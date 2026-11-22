@@ -10,6 +10,19 @@ final class SwitcherViewModel: ObservableObject {
     @Published var cardHeight: CGFloat = 146
     @Published var gridSpacing: CGFloat = 12
     @Published var isPersistentSession: Bool = false
+    @Published var statusNotice: String? = nil
+
+    private var noticeWorkItem: DispatchWorkItem?
+
+    func showNotice(_ text: String) {
+        noticeWorkItem?.cancel()
+        statusNotice = text
+        let item = DispatchWorkItem { [weak self] in
+            self?.statusNotice = nil
+        }
+        noticeWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: item)
+    }
 
     var selectedItem: WindowItem? {
         guard items.indices.contains(selectedIndex) else { return nil }
@@ -257,7 +270,12 @@ struct SwitcherView: View {
                 .padding(.top, 16)
 
                 HStack(spacing: 16) {
-                    if let selected = viewModel.selectedItem {
+                    if let notice = viewModel.statusNotice {
+                        Text(notice)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    } else if let selected = viewModel.selectedItem {
                         Text("\(selected.appName) — \(selected.displayTitle)")
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(.primary.opacity(0.85))
@@ -295,7 +313,16 @@ struct SwitcherView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 16) {
-                if let selected = viewModel.selectedItem {
+                if let notice = viewModel.statusNotice {
+                    Text(notice)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.yellow)
+                        .lineLimit(1)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.top, 22)
+                } else if let selected = viewModel.selectedItem {
                     Text("\(selected.appName)  ·  \(selected.displayTitle)")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))

@@ -39,6 +39,25 @@ enum DisplayStyle: String, CaseIterable, Identifiable {
     }
 }
 
+/// 拖动窗口到屏幕顶部时的热区行为模式
+enum TopSnapZoneMode: String, CaseIterable, Identifiable {
+    /// 整个顶部大区域直接最大化；鼠标贴顶停顿约 0.45s（或顶到最顶边）才弹出悬浮分屏布局
+    case hoverToExpand = "hoverToExpand"
+    /// 固定顶部正中弹出悬浮分屏布局，顶部左右两侧直接最大化
+    case fixedCenterLayout = "fixedCenterLayout"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .hoverToExpand:
+            return "顶部大区最大化 · 停顿/顶边弹出分屏布局（推荐）"
+        case .fixedCenterLayout:
+            return "固定顶部正中弹出分屏布局 · 两侧最大化"
+        }
+    }
+}
+
 /// 本机已安装应用信息（用于忽略名单配置）
 struct InstalledAppInfo: Identifiable, Hashable {
     let id: String // bundleIdentifier 或 appName
@@ -97,6 +116,9 @@ final class AppSettings: ObservableObject {
         static let optionTabEnabled = "optionTabEnabled"
         static let trackpadPersistentMode = "trackpadPersistentMode"
         static let ignoredApps = "ignoredApps"
+        static let snapEnabled = "snapEnabled"
+        static let topSnapZoneMode = "topSnapZoneMode"
+        static let snapAssistEnabled = "snapAssistEnabled"
     }
 
     @Published var gestureMode: GestureMode {
@@ -165,6 +187,21 @@ final class AppSettings: ObservableObject {
     /// 忽略名单（key = bundleIdentifier 或 appName, value = 展示名称）
     @Published var ignoredApps: [String: String] {
         didSet { UserDefaults.standard.set(ignoredApps, forKey: Keys.ignoredApps) }
+    }
+
+    /// 启用类 Windows 拖拽边缘/角落/顶部桌面分屏
+    @Published var snapEnabled: Bool {
+        didSet { UserDefaults.standard.set(snapEnabled, forKey: Keys.snapEnabled) }
+    }
+
+    /// 顶部热区触发模式（停顿展开布局 vs 固定正中布局）
+    @Published var topSnapZoneMode: TopSnapZoneMode {
+        didSet { UserDefaults.standard.set(topSnapZoneMode.rawValue, forKey: Keys.topSnapZoneMode) }
+    }
+
+    /// 分屏后空闲区域弹出窗口缩略图选择器（Snap Assist）
+    @Published var snapAssistEnabled: Bool {
+        didSet { UserDefaults.standard.set(snapAssistEnabled, forKey: Keys.snapAssistEnabled) }
     }
 
     func isAppIgnored(key: String) -> Bool {
@@ -272,6 +309,25 @@ final class AppSettings: ObservableObject {
         }
 
         self.ignoredApps = (defaults.dictionary(forKey: Keys.ignoredApps) as? [String: String]) ?? [:]
+
+        if defaults.object(forKey: Keys.snapEnabled) != nil {
+            self.snapEnabled = defaults.bool(forKey: Keys.snapEnabled)
+        } else {
+            self.snapEnabled = true
+        }
+
+        if let rawTop = defaults.string(forKey: Keys.topSnapZoneMode),
+           let topMode = TopSnapZoneMode(rawValue: rawTop) {
+            self.topSnapZoneMode = topMode
+        } else {
+            self.topSnapZoneMode = .hoverToExpand
+        }
+
+        if defaults.object(forKey: Keys.snapAssistEnabled) != nil {
+            self.snapAssistEnabled = defaults.bool(forKey: Keys.snapAssistEnabled)
+        } else {
+            self.snapAssistEnabled = true
+        }
     }
 }
 

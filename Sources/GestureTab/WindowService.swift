@@ -7,9 +7,6 @@ import ScreenCaptureKit
 @_silgen_name("_AXUIElementGetWindow")
 private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
 
-@_silgen_name("_AXUIElementCreateWithRemoteToken")
-private func _AXUIElementCreateWithRemoteToken(_ token: CFData) -> AXUIElement?
-
 private typealias CGSConnectionID = Int32
 private typealias CGSMainConnectionIDFn = @convention(c) () -> CGSConnectionID
 private typealias CGSHWCaptureWindowListFn = @convention(c) (
@@ -86,6 +83,7 @@ final class WindowService {
     func startMonitoring() {
         loadDiskThumbnailCache()
         updateFrontmostWindowMRU()
+        warmAXElementCache()
         captureVisibleThumbnailsInBackground()
 
         appActivateObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -93,9 +91,10 @@ final class WindowService {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            // 稍延迟等待目标 App 更新焦点窗口并缓存其最新画面
+            // 稍延迟等待目标 App 更新焦点窗口并缓存其最新画面与窗口句柄
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self?.updateFrontmostWindowMRU()
+                self?.warmAXElementCache()
                 self?.captureVisibleThumbnailsInBackground()
             }
         }
@@ -105,14 +104,16 @@ final class WindowService {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            // 切换到任意其他桌面/全屏后立即抓取该桌面全部窗口缓存
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+            // 切换到任意其他桌面/全屏后立即预热窗口句柄并抓取该桌面全部窗口缓存
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                self?.warmAXElementCache()
                 self?.captureVisibleThumbnailsInBackground()
             }
         }
 
-        // 每 2.5 秒低开销缓存一次当前可见窗口画面，以便最小化或切到其他桌面后仍保留缩略图
+        // 每 2.5 秒低开销缓存一次当前可见窗口画面与句柄
         backgroundTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+            self?.warmAXElementCache()
             self?.captureVisibleThumbnailsInBackground()
         }
     }
@@ -719,22 +720,60 @@ final class WindowService {
         axCacheLock.unlock()
     }
 
-    private func findAXWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? {
-        // 1) 当前桌面直接查询 kAXWindowsAttribute
+    private func warmAXElementCache() {
+        guard Self.hasAccessibilityPermission(prompt: false) else { return }
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let apps = NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular && $0.processIdentifier != selfPID && !$0.isTerminated
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            for app in apps {
+                let appAX = AXUIElementCreateApplication(app.processIdentifier)
+                for attr in [kAXWindowsAttribute as CFString, kAXChildrenAttribute as CFString] {
+                    var ref: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(appAX, attr, &ref) == .success,
+                       let elements = ref as? [AXUIElement] {
+                        for el in elements {
+                            var roleRef: CFTypeRef?
+                            if attr == (kAXChildrenAttribute as CFString) {
+                                AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
+                                if (roleRef as? String) != (kAXWindowRole as String) { continue }
+                            }
+                            var wid: CGWindowID = 0
+                            if _AXUIElementGetWindow(el, &wid) == .success, wid != 0 {
+                                self.setCachedAXElement(el, for: wid)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func findAXWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? {
+        // 1) 当前桌面直接查询 kAXWindowsAttribute 与 kAXChildrenAttribute
         let appAX = AXUIElementCreateApplication(pid)
-        var windowsRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-           let wins = windowsRef as? [AXUIElement] {
-            for w in wins {
-                var wid: CGWindowID = 0
-                if _AXUIElementGetWindow(w, &wid) == .success, wid == windowID {
-                    setCachedAXElement(w, for: windowID)
-                    return w
+        for attr in [kAXWindowsAttribute as CFString, kAXChildrenAttribute as CFString] {
+            var windowsRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(appAX, attr, &windowsRef) == .success,
+               let wins = windowsRef as? [AXUIElement] {
+                for w in wins {
+                    if attr == (kAXChildrenAttribute as CFString) {
+                        var roleRef: CFTypeRef?
+                        AXUIElementCopyAttributeValue(w, kAXRoleAttribute as CFString, &roleRef)
+                        if (roleRef as? String) != (kAXWindowRole as String) { continue }
+                    }
+                    var wid: CGWindowID = 0
+                    if _AXUIElementGetWindow(w, &wid) == .success, wid == windowID {
+                        setCachedAXElement(w, for: windowID)
+                        return w
+                    }
                 }
             }
         }
 
-        // 2) 检查此前切过该桌面时缓存下来的 AXUIElement
+        // 2) 检查此前访问该桌面时缓存下来的 AXUIElement
         if let cached = getCachedAXElement(for: windowID) {
             var wid: CGWindowID = 0
             if _AXUIElementGetWindow(cached, &wid) == .success, wid == windowID {
@@ -743,30 +782,65 @@ final class WindowService {
             removeCachedAXElement(for: windowID)
         }
 
-        // 3) 跨桌面（其他 Space）兜底：通过 _AXUIElementCreateWithRemoteToken 探测远端窗口句柄
-        for idx: Int64 in 0..<1000 {
-            var targetPID = pid
-            var magic: Int32 = 0x636f636f // "coco"
-            var elementID = idx
+        return nil
+    }
 
-            var token = Data(count: 20)
-            token.replaceSubrange(0..<4, with: withUnsafeBytes(of: &targetPID) { Data($0) })
-            token.replaceSubrange(8..<12, with: withUnsafeBytes(of: &magic) { Data($0) })
-            token.replaceSubrange(12..<20, with: withUnsafeBytes(of: &elementID) { Data($0) })
+    // MARK: - Window Frame Helpers (AX / Quartz Top-Left Coordinate System)
 
-            guard let el = _AXUIElementCreateWithRemoteToken(token as CFData) else { continue }
+    /// 将 Cocoa（左下原点）矩形转换为 AX / Quartz（主屏左上原点）矩形
+    static func cocoaRectToAXRect(_ cocoaRect: CGRect) -> CGRect {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? NSScreen.main?.frame.height ?? 900
+        let axY = primaryHeight - cocoaRect.maxY
+        return CGRect(x: cocoaRect.origin.x, y: axY, width: cocoaRect.width, height: cocoaRect.height)
+    }
 
-            var wid: CGWindowID = 0
-            guard _AXUIElementGetWindow(el, &wid) == .success, wid == windowID else { continue }
+    /// 将 AX / Quartz（主屏左上原点）矩形转换为 Cocoa（左下原点）矩形
+    static func axRectToCocoaRect(_ axRect: CGRect) -> CGRect {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? NSScreen.main?.frame.height ?? 900
+        let cocoaY = primaryHeight - axRect.maxY
+        return CGRect(x: axRect.origin.x, y: cocoaY, width: axRect.width, height: axRect.height)
+    }
 
-            var roleRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef) == .success,
-               (roleRef as? String) == (kAXWindowRole as String) {
-                setCachedAXElement(el, for: windowID)
-                return el
-            }
+    func getWindowFrame(_ axWindow: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let posVal = posRef,
+              let sizeVal = sizeRef else {
+            return nil
+        }
+        var pos = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posVal as! AXValue, .cgPoint, &pos),
+              AXValueGetValue(sizeVal as! AXValue, .cgSize, &size) else {
+            return nil
+        }
+        return CGRect(origin: pos, size: size)
+    }
+
+    /// 精确设置窗口在 AX 坐标系下的位置与大小（先调位置再调尺寸，最后二次修正位置以兼容最小宽高约束）
+    @discardableResult
+    func setWindowFrame(_ axWindow: AXUIElement, axFrame: CGRect) -> Bool {
+        var targetOrigin = axFrame.origin
+        var targetSize = axFrame.size
+
+        guard let posVal = AXValueCreate(.cgPoint, &targetOrigin),
+              let sizeVal = AXValueCreate(.cgSize, &targetSize) else {
+            return false
         }
 
+        AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posVal)
+        let sizeErr = AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, sizeVal)
+        AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posVal)
+        return sizeErr == .success
+    }
+
+    func getWindowID(for axWindow: AXUIElement) -> CGWindowID? {
+        var wid: CGWindowID = 0
+        if _AXUIElementGetWindow(axWindow, &wid) == .success, wid != 0 {
+            return wid
+        }
         return nil
     }
 }

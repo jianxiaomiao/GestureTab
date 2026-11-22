@@ -134,6 +134,8 @@ final class SwitcherController {
             if AppSettings.shared.hapticEnabled {
                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
             }
+        } else if !target.isFullScreen {
+            viewModel.showNotice("跨桌面窗口需先切过去浏览一次后才可最小化")
         }
     }
 
@@ -169,6 +171,8 @@ final class SwitcherController {
             if AppSettings.shared.hapticEnabled {
                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
             }
+        } else {
+            viewModel.showNotice("跨桌面窗口需先切过去浏览一次后才可用 W 关闭（可直接按 Q 退出程序）")
         }
 
         if viewModel.items.isEmpty {

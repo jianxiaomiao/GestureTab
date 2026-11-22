@@ -26,12 +26,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         WindowService.shared.startMonitoring()
         multitouch.start()
+        WindowSnapManager.shared.start()
 
         checkPermissionsOnLaunch()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         permissionPollTimer?.invalidate()
+        WindowSnapManager.shared.stop()
         multitouch.stop()
         WindowService.shared.stopMonitoring()
     }
@@ -97,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.rebuildMenu()
                 if axNow {
                     self.multitouch.restart()
+                    WindowSnapManager.shared.start()
                 }
                 if axNow && srNow {
                     timer.invalidate()
@@ -326,11 +329,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loginItem.state = LaunchAtLoginManager.isEnabled ? .on : .off
         menu.addItem(loginItem)
 
+        // 桌面拖拽分屏（类 Wins）子菜单
+        let snapMenu = NSMenu()
+        let snapToggle = NSMenuItem(title: "启用拖拽边缘/角落/顶部分屏", action: #selector(toggleSnapEnabled), keyEquivalent: "")
+        snapToggle.target = self
+        snapToggle.state = settings.snapEnabled ? .on : .off
+        snapMenu.addItem(snapToggle)
+
+        let snapAssistToggle = NSMenuItem(title: "分屏后空区弹出窗口缩略图 (Snap Assist)", action: #selector(toggleSnapAssist), keyEquivalent: "")
+        snapAssistToggle.target = self
+        snapAssistToggle.state = settings.snapAssistEnabled ? .on : .off
+        snapMenu.addItem(snapAssistToggle)
+
+        snapMenu.addItem(.separator())
+        let topModeHeader = NSMenuItem(title: "顶部热区触发模式：", action: nil, keyEquivalent: "")
+        topModeHeader.isEnabled = false
+        snapMenu.addItem(topModeHeader)
+
+        for tMode in TopSnapZoneMode.allCases {
+            let tItem = NSMenuItem(title: tMode.displayName, action: #selector(selectTopSnapMode(_:)), keyEquivalent: "")
+            tItem.target = self
+            tItem.representedObject = tMode.rawValue
+            tItem.state = (settings.topSnapZoneMode == tMode) ? .on : .off
+            snapMenu.addItem(tItem)
+        }
+
+        snapMenu.addItem(.separator())
+        let dockTipItem = NSMenuItem(title: "打开系统「桌面与程序坞」设置（建议关闭原生边缘拼贴）", action: #selector(openDesktopDockSettings), keyEquivalent: "")
+        dockTipItem.target = self
+        snapMenu.addItem(dockTipItem)
+
+        let snapParent = NSMenuItem(title: "桌面拖拽分屏（类 Windows）", action: nil, keyEquivalent: "")
+        snapParent.submenu = snapMenu
+        menu.addItem(snapParent)
+
         menu.addItem(.separator())
 
         let trackpadTipItem = NSMenuItem(title: "打开系统「触控板」设置（关闭原生四指防冲突）", action: #selector(openTrackpadSettings), keyEquivalent: "")
         trackpadTipItem.target = self
         menu.addItem(trackpadTipItem)
+
+        let dockSettingsItem = NSMenuItem(title: "打开系统「桌面与程序坞」设置（关闭原生磁吸防冲突）", action: #selector(openDesktopDockSettings), keyEquivalent: "")
+        dockSettingsItem.target = self
+        menu.addItem(dockSettingsItem)
 
         let restartItem = NSMenuItem(title: "重启触控板监听", action: #selector(restartMultitouch), keyEquivalent: "")
         restartItem.target = self
@@ -428,6 +469,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func toggleSnapEnabled() {
+        AppSettings.shared.snapEnabled.toggle()
+        if AppSettings.shared.snapEnabled {
+            WindowSnapManager.shared.start()
+        } else {
+            WindowSnapManager.shared.stop()
+        }
+        rebuildMenu()
+    }
+
+    @objc private func toggleSnapAssist() {
+        AppSettings.shared.snapAssistEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func selectTopSnapMode(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String,
+           let mode = TopSnapZoneMode(rawValue: raw) {
+            AppSettings.shared.topSnapZoneMode = mode
+            rebuildMenu()
+        }
+    }
+
     @objc private func toggleIgnoredApp(_ sender: NSMenuItem) {
         if let pair = sender.representedObject as? [String], pair.count == 2 {
             AppSettings.shared.toggleIgnoredApp(key: pair[0], name: pair[1])
@@ -459,6 +523,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openTrackpadSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.Trackpad-Settings.extension") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openDesktopDockSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Desktop-Settings.extension") {
             NSWorkspace.shared.open(url)
         }
     }
