@@ -60,7 +60,12 @@ struct WindowItem: Identifiable {
     var isMinimized: Bool
     let isFullScreen: Bool
     let isOnScreen: Bool
+    let isWindowlessApp: Bool
     var thumbnail: NSImage?
+
+    static func syntheticID(for pid: pid_t) -> CGWindowID {
+        0x8000_0000 | UInt32(bitPattern: pid)
+    }
 
     var ignoreKey: String {
         runningApp?.bundleIdentifier ?? appName

@@ -315,6 +315,7 @@ final class WindowService {
                     isMinimized: isMinimized,
                     isFullScreen: isFullScreen,
                     isOnScreen: cgInfo?.isOnScreen ?? false,
+                    isWindowlessApp: false,
                     thumbnail: cachedThumb
                 )
                 zOrderByID[wid] = cgInfo?.zIndex ?? Int.max
@@ -358,9 +359,34 @@ final class WindowService {
                 isMinimized: false,
                 isFullScreen: isFS,
                 isOnScreen: cgInfo.isOnScreen,
+                isWindowlessApp: false,
                 thumbnail: getCachedThumbnail(for: wid)
             )
             zOrderByID[wid] = cgInfo.zIndex
+        }
+
+        // 2.5) 对已运行但当前没有任何打开窗口的应用（例如刚按 W 关掉最后一个窗口），保留为图标卡片以便快速唤起
+        let pidsWithWindows = Set(itemsByID.values.map(\.pid))
+        for app in regularApps {
+            let pid = app.processIdentifier
+            guard !pidsWithWindows.contains(pid), app.bundleURL != nil else { continue }
+            let synID = WindowItem.syntheticID(for: pid)
+            let name = app.localizedName ?? "App"
+            itemsByID[synID] = WindowItem(
+                id: synID,
+                pid: pid,
+                appName: name,
+                title: name,
+                appIcon: app.icon,
+                axElement: nil,
+                runningApp: app,
+                isMinimized: false,
+                isFullScreen: false,
+                isOnScreen: false,
+                isWindowlessApp: true,
+                thumbnail: nil
+            )
+            zOrderByID[synID] = Int.max - 1
         }
 
         // 3) 按 MRU 排序，未在 MRU 中的按 WindowServer zOrder 排在后面
@@ -572,6 +598,18 @@ final class WindowService {
 
     func activateWindow(_ item: WindowItem) {
         bumpMRU(windowID: item.id)
+
+        // 若是无窗口的后台存活应用（如刚用 W 关掉最后一个窗口），发送 Dock 同款 reopen 事件唤起新窗口
+        if item.isWindowlessApp {
+            if let bundleURL = item.runningApp?.bundleURL {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = true
+                NSWorkspace.shared.openApplication(at: bundleURL, configuration: config) { _, _ in }
+            } else {
+                item.runningApp?.activate(options: [])
+            }
+            return
+        }
 
         // 若目标窗口在 Dock 最小化，先取消最小化
         if item.isMinimized, let ax = item.axElement {

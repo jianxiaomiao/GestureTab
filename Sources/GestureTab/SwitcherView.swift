@@ -165,6 +165,32 @@ final class SwitcherViewModel: ObservableObject {
             items[idx].isMinimized = isMinimized
         }
     }
+
+    func handleWindowClosed(windowID: CGWindowID, pid: pid_t) {
+        let hasOtherWindows = items.contains { $0.pid == pid && $0.id != windowID }
+        if hasOtherWindows {
+            removeItem(id: windowID)
+        } else if let idx = items.firstIndex(where: { $0.id == windowID }) {
+            // 最后一个窗口被 W 关闭时，保留该应用为图标卡片，方便随时一键重新打开窗口
+            let old = items[idx]
+            let synID = WindowItem.syntheticID(for: pid)
+            items[idx] = WindowItem(
+                id: synID,
+                pid: pid,
+                appName: old.appName,
+                title: old.appName,
+                appIcon: old.appIcon,
+                axElement: nil,
+                runningApp: old.runningApp,
+                isMinimized: false,
+                isFullScreen: false,
+                isOnScreen: false,
+                isWindowlessApp: true,
+                thumbnail: nil
+            )
+            WindowService.shared.bumpMRU(windowID: synID)
+        }
+    }
 }
 
 struct VisualEffectBackdrop: NSViewRepresentable {
@@ -370,7 +396,9 @@ private struct CompactWindowCardView: View {
 
                 Spacer(minLength: 2)
 
-                if item.isFullScreen {
+                if item.isWindowlessApp {
+                    StatusBadge(text: "无窗口", lightStyle: false)
+                } else if item.isFullScreen {
                     StatusBadge(text: "全屏", lightStyle: false)
                 } else if item.isMinimized {
                     StatusBadge(text: "最小化", lightStyle: false)
@@ -458,7 +486,9 @@ private struct MissionControlCardView: View {
                 }
                 .frame(width: cardWidth, height: thumbHeight)
                 .overlay(alignment: .topTrailing) {
-                    if item.isFullScreen {
+                    if item.isWindowlessApp {
+                        StatusBadge(text: "无窗口", lightStyle: true).padding(6)
+                    } else if item.isFullScreen {
                         StatusBadge(text: "全屏", lightStyle: true).padding(6)
                     } else if item.isMinimized {
                         StatusBadge(text: "最小化", lightStyle: true).padding(6)

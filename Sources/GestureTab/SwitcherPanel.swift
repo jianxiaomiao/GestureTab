@@ -127,7 +127,8 @@ final class SwitcherController {
     func performMKeyAction() {
         guard AppSettings.shared.mMinimizeEnabled,
               isVisible,
-              let target = viewModel.selectedItem else { return }
+              let target = viewModel.selectedItem,
+              !target.isWindowlessApp else { return }
         if let newMinimized = WindowService.shared.toggleMinimizeWindow(target) {
             viewModel.setMinimized(windowID: target.id, isMinimized: newMinimized)
             if AppSettings.shared.hapticEnabled {
@@ -155,15 +156,16 @@ final class SwitcherController {
         }
     }
 
-    /// 按 W 键关闭当前选中的单个窗口
+    /// 按 W 键关闭当前选中的单个窗口；若为该应用的最后一个窗口，则转为应用图标卡片保留以便快速重启窗口
     func performWKeyAction() {
         guard AppSettings.shared.wCloseEnabled,
               isVisible,
-              let target = viewModel.selectedItem else { return }
+              let target = viewModel.selectedItem,
+              !target.isWindowlessApp else { return }
         cancelPendingSteps()
 
         if WindowService.shared.closeWindow(target) {
-            viewModel.removeItem(id: target.id)
+            viewModel.handleWindowClosed(windowID: target.id, pid: target.pid)
             if AppSettings.shared.hapticEnabled {
                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
             }
