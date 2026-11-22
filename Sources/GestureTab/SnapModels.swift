@@ -90,8 +90,9 @@ struct SnapLayout: Identifiable, Equatable {
         ]
     )
 
-    /// 顶部悬浮分屏布局选择器展示的 6 套经典布局
+    /// 顶部悬浮分屏布局选择器展示的模板（含最大化 + 6 套经典分屏）
     static let barTemplates: [SnapLayout] = [
+        .maximize,
         .halves,
         .mainAndSide,
         .thirds,

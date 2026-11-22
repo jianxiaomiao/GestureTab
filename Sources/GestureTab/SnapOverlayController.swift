@@ -78,8 +78,8 @@ final class SnapLayoutBarController {
     private(set) var currentScreen: NSScreen?
 
     private let templates = SnapLayout.barTemplates
-    private let thumbWidth: CGFloat = 86
-    private let thumbHeight: CGFloat = 52
+    private let thumbWidth: CGFloat = 78
+    private let thumbHeight: CGFloat = 50
     private let itemSpacing: CGFloat = 12
     private let hPadding: CGFloat = 16
     private let vPadding: CGFloat = 12
@@ -146,15 +146,16 @@ final class SnapLayoutBarController {
     func hitTest(cocoaMouse: CGPoint) -> SnapTarget? {
         guard isVisible, let panel, let screen = currentScreen else { return nil }
         let pf = panel.frame
-        // 向下稍微留出 12pt 容差，方便拖动时顺滑进出顶部布局栏
-        let hitBounds = CGRect(x: pf.minX, y: pf.minY - 12, width: pf.width, height: pf.height + 24)
+        // 向上延伸到屏幕最顶边，向下留出 14pt 容差，保证从顶边拖入布局栏全程不断触
+        let hitMaxY = max(pf.maxY + 24, screen.frame.maxY)
+        let hitBounds = CGRect(x: pf.minX, y: pf.minY - 14, width: pf.width, height: hitMaxY - (pf.minY - 14))
         guard hitBounds.contains(cocoaMouse) else {
             viewModel.hoveredLayoutID = nil
             viewModel.hoveredZoneIndex = nil
             return nil
         }
 
-        // 计算在 6 个缩略图块内的横向索引
+        // 计算在模板列表内的横向索引
         let localX = cocoaMouse.x - pf.minX - hPadding
         let strideX = thumbWidth + itemSpacing
         guard localX >= 0 else {
@@ -212,6 +213,9 @@ private struct SnapLayoutBarView: View {
             HStack(spacing: itemSpacing) {
                 ForEach(templates) { layout in
                     ZStack(alignment: .topLeading) {
+                        Color.clear
+                            .frame(width: thumbWidth, height: thumbHeight)
+
                         ForEach(Array(layout.zones.enumerated()), id: \.element.id) { zIdx, zone in
                             let nr = zone.normalizedRect
                             let isHovered = (viewModel.hoveredLayoutID == layout.id && viewModel.hoveredZoneIndex == zIdx)
@@ -234,7 +238,8 @@ private struct SnapLayoutBarView: View {
                                 .offset(x: zx, y: zy)
                         }
                     }
-                    .frame(width: thumbWidth, height: thumbHeight)
+                    .frame(width: thumbWidth, height: thumbHeight, alignment: .topLeading)
+                    .clipped()
                 }
             }
 

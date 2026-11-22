@@ -20,8 +20,6 @@ final class WindowSnapManager {
     private let previewOverlay = SnapPreviewOverlayController()
     private let layoutBar = SnapLayoutBarController()
     private var currentTarget: SnapTarget?
-    private var topDwellStartTime: TimeInterval?
-    private var topDwellWorkItem: DispatchWorkItem?
 
     /// 记录已被分屏/最大化的窗口原始尺寸，拖离边缘时自动还原
     private var snappedOriginalFrames: [CGWindowID: CGRect] = [:]
@@ -194,7 +192,12 @@ final class WindowSnapManager {
             snappedOriginalFrames[wid] = startFrame
         }
 
-        WindowService.shared.setWindowFrame(axWin, axFrame: target.axRect)
+        let targetAXRect = target.axRect
+        WindowService.shared.setWindowFrame(axWin, axFrame: targetAXRect)
+        // 部分应用（如 Electron/Antigravity/Chrome）在松手同一帧会覆盖尺寸，60ms 后补设一次保证宽高精确生效
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+            WindowService.shared.setWindowFrame(axWin, axFrame: targetAXRect)
+        }
 
         if AppSettings.shared.hapticEnabled {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
@@ -218,15 +221,8 @@ final class WindowSnapManager {
     private func resetDrag() {
         dragState = .idle
         currentTarget = nil
-        cancelTopDwell()
         previewOverlay.hide()
         layoutBar.hide()
-    }
-
-    private func cancelTopDwell() {
-        topDwellStartTime = nil
-        topDwellWorkItem?.cancel()
-        topDwellWorkItem = nil
     }
 
     // MARK: - Hot Zone Evaluation
@@ -242,22 +238,20 @@ final class WindowSnapManager {
 
         let screenAX = WindowService.cocoaRectToAXRect(screen.frame)
         let visibleAX = WindowService.cocoaRectToAXRect(screen.visibleFrame)
-        let now = ProcessInfo.processInfo.systemUptime
 
         // 1) 若顶部悬浮分屏布局栏已展开，优先命中其中的具体布局格
         if layoutBar.isVisible {
             if let barTarget = layoutBar.hitTest(cocoaMouse: cocoaMouse) {
-                currentTarget = barTarget
-                previewOverlay.showPreview(cocoaRect: barTarget.cocoaRect)
+                selectTarget(barTarget)
                 return
             }
 
-            let barTopTolerance = visibleAX.minY + 145
+            let barTopTolerance = visibleAX.minY + 130
             let barPF = layoutBar.panelFrame
             if axLocation.y <= barTopTolerance &&
-               axLocation.x >= barPF.minX - 40 &&
-               axLocation.x <= barPF.maxX + 40 {
-                // 鼠标在布局栏边缘过渡地带，保持布局栏展开但清除错误预览
+               axLocation.x >= barPF.minX - 60 &&
+               axLocation.x <= barPF.maxX + 60 {
+                // 鼠标在菜单栏与布局栏之间过渡地带，保持布局栏展开
                 currentTarget = nil
                 previewOverlay.hide()
                 return
@@ -267,13 +261,14 @@ final class WindowSnapManager {
         }
 
         // 2) 四角 1/4 分屏热区（L 形角落判定，优先于单边）
-        let cornerW = min(130, visibleAX.width * 0.11)
+        let cornerW = min(130, visibleAX.width * 0.10)
         let cornerH = min(110, visibleAX.height * 0.12)
         let edgeStrip: CGFloat = 18
+        let topStrip: CGFloat = 24
 
         let nearLeftEdge = axLocation.x <= screenAX.minX + edgeStrip
         let nearRightEdge = axLocation.x >= screenAX.maxX - edgeStrip
-        let nearTopEdge = axLocation.y <= visibleAX.minY + edgeStrip
+        let nearTopEdge = axLocation.y <= visibleAX.minY + topStrip
         let nearBottomEdge = axLocation.y >= min(visibleAX.maxY, screenAX.maxY) - edgeStrip
 
         let inLeftBand = axLocation.x <= screenAX.minX + cornerW
@@ -282,33 +277,29 @@ final class WindowSnapManager {
         let inBottomBand = axLocation.y >= screenAX.maxY - cornerH
 
         if (nearTopEdge && inLeftBand) || (nearLeftEdge && inTopBand) {
-            cancelTopDwell()
             selectTarget(SnapTarget(screen: screen, layout: .quarters, zoneIndex: 0))
             return
         }
         if (nearTopEdge && inRightBand) || (nearRightEdge && inTopBand) {
-            cancelTopDwell()
             selectTarget(SnapTarget(screen: screen, layout: .quarters, zoneIndex: 1))
             return
         }
         if (nearBottomEdge && inLeftBand) || (nearLeftEdge && inBottomBand) {
-            cancelTopDwell()
             selectTarget(SnapTarget(screen: screen, layout: .quarters, zoneIndex: 2))
             return
         }
         if (nearBottomEdge && inRightBand) || (nearRightEdge && inBottomBand) {
-            cancelTopDwell()
             selectTarget(SnapTarget(screen: screen, layout: .quarters, zoneIndex: 3))
             return
         }
 
-        // 3) 顶部热区：最大化 / 顶部悬浮分屏布局（支持两种可切换模式）
+        // 3) 顶部热区：鼠标位置一到达顶部立即触发（零延迟不碰运气）
         if nearTopEdge {
             let relX = (axLocation.x - visibleAX.minX) / max(visibleAX.width, 1)
 
             switch AppSettings.shared.topSnapZoneMode {
-            case .fixedCenterLayout:
-                if relX >= 0.36 && relX <= 0.64 {
+            case .centerLayoutSidesMaximize:
+                if relX >= 0.24 && relX <= 0.76 {
                     layoutBar.show(on: screen)
                     if let barTarget = layoutBar.hitTest(cocoaMouse: cocoaMouse) {
                         selectTarget(barTarget)
@@ -320,47 +311,17 @@ final class WindowSnapManager {
                     selectTarget(SnapTarget(screen: screen, layout: .maximize, zoneIndex: 0))
                 }
 
-            case .hoverToExpand:
-                let pushedVeryTop = axLocation.y <= screenAX.minY + 5
-                let targetDelay: TimeInterval = pushedVeryTop ? 0.18 : 0.42
-
-                if topDwellStartTime == nil {
-                    topDwellStartTime = now
-                    let item = DispatchWorkItem { [weak self] in
-                        guard let self, case .dragging = self.dragState else { return }
-                        self.layoutBar.show(on: screen)
-                        let mouseNow = NSEvent.mouseLocation
-                        if let barTarget = self.layoutBar.hitTest(cocoaMouse: mouseNow) {
-                            self.selectTarget(barTarget)
-                        } else {
-                            self.currentTarget = nil
-                            self.previewOverlay.hide()
-                        }
-                    }
-                    topDwellWorkItem?.cancel()
-                    topDwellWorkItem = item
-                    DispatchQueue.main.asyncAfter(deadline: .now() + targetDelay, execute: item)
-                }
-
-                let dwellDuration = now - (topDwellStartTime ?? now)
-                if dwellDuration >= targetDelay {
-                    topDwellWorkItem?.cancel()
-                    topDwellWorkItem = nil
-                    layoutBar.show(on: screen)
-                    if let barTarget = layoutBar.hitTest(cocoaMouse: cocoaMouse) {
-                        selectTarget(barTarget)
-                    } else {
-                        currentTarget = nil
-                        previewOverlay.hide()
-                    }
+            case .fullTopLayout:
+                layoutBar.show(on: screen)
+                if let barTarget = layoutBar.hitTest(cocoaMouse: cocoaMouse) {
+                    selectTarget(barTarget)
                 } else {
-                    selectTarget(SnapTarget(screen: screen, layout: .maximize, zoneIndex: 0))
+                    currentTarget = nil
+                    previewOverlay.hide()
                 }
             }
             return
         }
-
-        cancelTopDwell()
 
         // 4) 左右边缘 1/2 分屏
         if nearLeftEdge {

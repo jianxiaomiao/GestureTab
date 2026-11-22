@@ -39,21 +39,21 @@ enum DisplayStyle: String, CaseIterable, Identifiable {
     }
 }
 
-/// 拖动窗口到屏幕顶部时的热区行为模式
+/// 拖动窗口到屏幕顶部时的热区行为模式（全部基于鼠标位置即时触发，无需等待碰运气）
 enum TopSnapZoneMode: String, CaseIterable, Identifiable {
-    /// 整个顶部大区域直接最大化；鼠标贴顶停顿约 0.45s（或顶到最顶边）才弹出悬浮分屏布局
-    case hoverToExpand = "hoverToExpand"
-    /// 固定顶部正中弹出悬浮分屏布局，顶部左右两侧直接最大化
-    case fixedCenterLayout = "fixedCenterLayout"
+    /// 顶部中间（25%~75%）鼠标一到立刻弹出分屏布局；顶部左右两侧直接最大化
+    case centerLayoutSidesMaximize = "centerLayoutSidesMaximize"
+    /// 整个顶部边缘（10%~90%）鼠标一到都立刻弹出分屏布局（布局栏内包含「最大化」模板）
+    case fullTopLayout = "fullTopLayout"
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .hoverToExpand:
-            return "顶部大区最大化 · 停顿/顶边弹出分屏布局（推荐）"
-        case .fixedCenterLayout:
-            return "固定顶部正中弹出分屏布局 · 两侧最大化"
+        case .centerLayoutSidesMaximize:
+            return "顶部正中一到即弹分屏布局 · 两侧直接最大化（推荐）"
+        case .fullTopLayout:
+            return "整个顶部边缘一到即弹分屏布局（含最大化卡片）"
         }
     }
 }
@@ -320,7 +320,7 @@ final class AppSettings: ObservableObject {
            let topMode = TopSnapZoneMode(rawValue: rawTop) {
             self.topSnapZoneMode = topMode
         } else {
-            self.topSnapZoneMode = .hoverToExpand
+            self.topSnapZoneMode = .centerLayoutSidesMaximize
         }
 
         if defaults.object(forKey: Keys.snapAssistEnabled) != nil {

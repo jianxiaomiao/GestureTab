@@ -349,15 +349,24 @@ final class WindowService {
                        abs(cgInfo.bounds.height - screen.frame.height) <= 2
             }()
 
+            let cachedAX = getCachedAXElement(for: wid)
+            var isMin = false
+            if let cachedAX {
+                var minRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(cachedAX, kAXMinimizedAttribute as CFString, &minRef) == .success {
+                    isMin = (minRef as? Bool) ?? false
+                }
+            }
+
             itemsByID[wid] = WindowItem(
                 id: wid,
                 pid: cgInfo.pid,
                 appName: app.localizedName ?? cgInfo.ownerName,
                 title: cgInfo.title,
                 appIcon: app.icon,
-                axElement: getCachedAXElement(for: wid),
+                axElement: cachedAX,
                 runningApp: app,
-                isMinimized: false,
+                isMinimized: isMin,
                 isFullScreen: isFS,
                 isOnScreen: cgInfo.isOnScreen,
                 isWindowlessApp: false,
@@ -699,7 +708,16 @@ final class WindowService {
 
         let nextMin = !currentMin
         let err = AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, nextMin as CFBoolean)
-        return err == .success ? nextMin : nil
+        guard err == .success else { return nil }
+
+        // 部分跨桌面窗口设置恢复时可能被系统忽略，回读校验确认是否真正变更
+        var verifyRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(ax, kAXMinimizedAttribute as CFString, &verifyRef) == .success,
+           let actual = verifyRef as? Bool,
+           actual != nextMin {
+            return nil
+        }
+        return nextMin
     }
 
     private func getCachedAXElement(for windowID: CGWindowID) -> AXUIElement? {
@@ -819,9 +837,31 @@ final class WindowService {
         return CGRect(origin: pos, size: size)
     }
 
-    /// 精确设置窗口在 AX 坐标系下的位置与大小（先调位置再调尺寸，最后二次修正位置以兼容最小宽高约束）
+    /// 精确设置窗口在 AX 坐标系下的位置与大小（兼容 Electron / Chromium AXEnhancedUserInterface 约束）
     @discardableResult
     func setWindowFrame(_ axWindow: AXUIElement, axFrame: CGRect) -> Bool {
+        var pid: pid_t = 0
+        AXUIElementGetPid(axWindow, &pid)
+
+        var appAX: AXUIElement?
+        var wasEnhanced = false
+        if pid != 0 {
+            let a = AXUIElementCreateApplication(pid)
+            var enhancedRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(a, "AXEnhancedUserInterface" as CFString, &enhancedRef) == .success,
+               let enabled = enhancedRef as? Bool, enabled {
+                wasEnhanced = true
+                AXUIElementSetAttributeValue(a, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+            }
+            appAX = a
+        }
+
+        defer {
+            if wasEnhanced, let appAX {
+                AXUIElementSetAttributeValue(appAX, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+            }
+        }
+
         var targetOrigin = axFrame.origin
         var targetSize = axFrame.size
 
@@ -830,10 +870,12 @@ final class WindowService {
             return false
         }
 
+        // 先设尺寸 -> 再设位置 -> 再补设尺寸和位置，避免大窗口移到下半屏时因超出底边被系统拒绝缩放
+        let sizeErr1 = AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, sizeVal)
         AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posVal)
-        let sizeErr = AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, sizeVal)
+        let sizeErr2 = AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, sizeVal)
         AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posVal)
-        return sizeErr == .success
+        return sizeErr1 == .success || sizeErr2 == .success
     }
 
     func getWindowID(for axWindow: AXUIElement) -> CGWindowID? {
