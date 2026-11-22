@@ -287,8 +287,6 @@ final class MultitouchManager {
     private func evaluateHoldRepeat() {
         guard AppSettings.shared.autoRepeatEnabled else { return }
 
-        let hStep = AppSettings.shared.horizontalStep
-        let vStep = AppSettings.shared.verticalStep
         let now = ProcessInfo.processInfo.systemUptime
 
         lock.lock()
@@ -299,20 +297,18 @@ final class MultitouchManager {
 
         let cx = currentCentroidX
         let cy = currentCentroidY
-        let ox = activeOriginX
-        let oy = activeOriginY
-        let lastSlide = lastSlideUptime
         let lastRepeat = lastAutoRepeatUptime
         let edgeEntered = edgeEnteredUptime
 
         var dirCol = 0
         var dirRow = 0
-        var requiredHoldDelay: TimeInterval = 0.32
-        var repeatInterval: TimeInterval = 0.22
-        var holdStartTime = lastSlide
+        var holdStartTime = now
+        let requiredHoldDelay: TimeInterval = 0.20
+        let repeatInterval: TimeInterval = 0.21
 
-        // 1) 优先检测触控板物理边缘推力（到达边界滑不动时继续沿该方向前进）
-        let edgeMargin = 0.13
+        // 仅在真正触及触控板最外圈物理边缘（10% 边界区）时才触发边缘连选；
+        // 中间区域停住手指绝对保持静止，不自动偏移。
+        let edgeMargin = 0.10
         let inRightEdge = cx >= (1.0 - edgeMargin)
         let inLeftEdge = cx <= edgeMargin
         let inTopEdge = cy >= (1.0 - edgeMargin)
@@ -331,28 +327,8 @@ final class MultitouchManager {
                 edgeEnteredUptime = now
             }
             holdStartTime = edgeEnteredUptime ?? now
-            requiredHoldDelay = 0.16
-            repeatInterval = 0.19
         } else {
             edgeEnteredUptime = nil
-
-            // 2) 检测从起点推开一段距离并保持按住（类似摇杆：向右移一段不松手就继续右选）
-            let offX = cx - ox
-            let offY = cy - oy
-            let holdThresholdX = max(hStep * 1.35, 0.18)
-            let holdThresholdY = max(vStep * 1.35, 0.19)
-            let ratioX = abs(offX) / holdThresholdX
-            let ratioY = abs(offY) / holdThresholdY
-
-            if ratioX >= 1.0 || ratioY >= 1.0 {
-                if ratioX >= ratioY {
-                    dirCol = offX > 0 ? 1 : -1
-                } else {
-                    dirRow = offY > 0 ? -1 : 1
-                }
-                requiredHoldDelay = 0.32
-                repeatInterval = 0.22
-            }
         }
 
         let shouldFire = (dirCol != 0 || dirRow != 0)
@@ -361,7 +337,6 @@ final class MultitouchManager {
 
         if shouldFire {
             lastAutoRepeatUptime = now
-            // 同步更新锚点防止手抖叠加
             stepAccumX = 0
             stepAccumY = 0
         }
