@@ -7,6 +7,9 @@ import ScreenCaptureKit
 @_silgen_name("_AXUIElementGetWindow")
 private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
 
+@_silgen_name("_AXUIElementCreateWithRemoteToken")
+private func _AXUIElementCreateWithRemoteToken(_ token: CFData) -> AXUIElement?
+
 private typealias CGSConnectionID = Int32
 private typealias CGSMainConnectionIDFn = @convention(c) () -> CGSConnectionID
 private typealias CGSHWCaptureWindowListFn = @convention(c) (
@@ -57,6 +60,9 @@ final class WindowService {
 
     private let thumbnailLock = NSLock()
     private var thumbnailCache: [CGWindowID: NSImage] = [:]
+
+    private let axCacheLock = NSLock()
+    private var axElementCache: [CGWindowID: AXUIElement] = [:]
 
     private let mruLock = NSLock()
     private var mruOrder: [CGWindowID] = []
@@ -290,6 +296,7 @@ final class WindowService {
 
                 let resolvedTitle = !axTitle.isEmpty ? axTitle : (cgInfo?.title ?? "")
                 let cachedThumb = getCachedThumbnail(for: wid)
+                setCachedAXElement(axWin, for: wid)
 
                 itemsByID[wid] = WindowItem(
                     id: wid,
@@ -340,7 +347,7 @@ final class WindowService {
                 appName: app.localizedName ?? cgInfo.ownerName,
                 title: cgInfo.title,
                 appIcon: app.icon,
-                axElement: nil,
+                axElement: getCachedAXElement(for: wid),
                 runningApp: app,
                 isMinimized: false,
                 isFullScreen: isFS,
@@ -612,7 +619,11 @@ final class WindowService {
         }
 
         let err = AXUIElementPerformAction(closeBtn as! AXUIElement, kAXPressAction as CFString)
-        return err == .success
+        if err == .success {
+            removeCachedAXElement(for: item.id)
+            return true
+        }
+        return false
     }
 
     /// 退出目标窗口所属的整个应用程序（等效 Cmd+Q 优雅退出）
@@ -627,19 +638,72 @@ final class WindowService {
         return false
     }
 
+    private func getCachedAXElement(for windowID: CGWindowID) -> AXUIElement? {
+        axCacheLock.lock()
+        defer { axCacheLock.unlock() }
+        return axElementCache[windowID]
+    }
+
+    private func setCachedAXElement(_ element: AXUIElement, for windowID: CGWindowID) {
+        axCacheLock.lock()
+        axElementCache[windowID] = element
+        axCacheLock.unlock()
+    }
+
+    private func removeCachedAXElement(for windowID: CGWindowID) {
+        axCacheLock.lock()
+        axElementCache.removeValue(forKey: windowID)
+        axCacheLock.unlock()
+    }
+
     private func findAXWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? {
+        // 1) 当前桌面直接查询 kAXWindowsAttribute
         let appAX = AXUIElementCreateApplication(pid)
         var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let wins = windowsRef as? [AXUIElement] else {
-            return nil
-        }
-        for w in wins {
-            var wid: CGWindowID = 0
-            if _AXUIElementGetWindow(w, &wid) == .success, wid == windowID {
-                return w
+        if AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let wins = windowsRef as? [AXUIElement] {
+            for w in wins {
+                var wid: CGWindowID = 0
+                if _AXUIElementGetWindow(w, &wid) == .success, wid == windowID {
+                    setCachedAXElement(w, for: windowID)
+                    return w
+                }
             }
         }
+
+        // 2) 检查此前切过该桌面时缓存下来的 AXUIElement
+        if let cached = getCachedAXElement(for: windowID) {
+            var wid: CGWindowID = 0
+            if _AXUIElementGetWindow(cached, &wid) == .success, wid == windowID {
+                return cached
+            }
+            removeCachedAXElement(for: windowID)
+        }
+
+        // 3) 跨桌面（其他 Space）兜底：通过 _AXUIElementCreateWithRemoteToken 探测远端窗口句柄
+        for idx: Int64 in 0..<1000 {
+            var targetPID = pid
+            var magic: Int32 = 0x636f636f // "coco"
+            var elementID = idx
+
+            var token = Data(count: 20)
+            token.replaceSubrange(0..<4, with: withUnsafeBytes(of: &targetPID) { Data($0) })
+            token.replaceSubrange(8..<12, with: withUnsafeBytes(of: &magic) { Data($0) })
+            token.replaceSubrange(12..<20, with: withUnsafeBytes(of: &elementID) { Data($0) })
+
+            guard let el = _AXUIElementCreateWithRemoteToken(token as CFData) else { continue }
+
+            var wid: CGWindowID = 0
+            guard _AXUIElementGetWindow(el, &wid) == .success, wid == windowID else { continue }
+
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef) == .success,
+               (roleRef as? String) == (kAXWindowRole as String) {
+                setCachedAXElement(el, for: windowID)
+                return el
+            }
+        }
+
         return nil
     }
 }
