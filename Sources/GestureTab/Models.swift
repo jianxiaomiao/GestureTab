@@ -20,6 +20,25 @@ enum GestureMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// 多任务视图的展示风格
+enum DisplayStyle: String, CaseIterable, Identifiable {
+    /// 居中毛玻璃小面板（自动缩放卡片禁止滚动）
+    case compactPanel = "compactPanel"
+    /// 仿 macOS 调度中心全屏视图（铺满屏幕大图展示 + 底部 App 图标）
+    case missionControl = "missionControl"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .compactPanel:
+            return "紧凑悬浮面板（自动缩放 · 禁止滚动）"
+        case .missionControl:
+            return "全屏调度视图（仿调度中心风格）"
+        }
+    }
+}
+
 /// 单个可切换窗口的数据模型
 struct WindowItem: Identifiable {
     let id: CGWindowID
@@ -47,6 +66,7 @@ final class AppSettings: ObservableObject {
     private enum Keys {
         static let settingsVersion = "settingsVersion"
         static let gestureMode = "gestureMode"
+        static let displayStyle = "displayStyle"
         static let horizontalStep = "horizontalStep"
         static let verticalStep = "verticalStep"
         static let columnsCount = "columnsCount"
@@ -56,6 +76,10 @@ final class AppSettings: ObservableObject {
 
     @Published var gestureMode: GestureMode {
         didSet { UserDefaults.standard.set(gestureMode.rawValue, forKey: Keys.gestureMode) }
+    }
+
+    @Published var displayStyle: DisplayStyle {
+        didSet { UserDefaults.standard.set(displayStyle.rawValue, forKey: Keys.displayStyle) }
     }
 
     /// 水平方向每步进一格所需的归一化触控板位移（默认 0.135）
@@ -96,6 +120,13 @@ final class AppSettings: ObservableObject {
             self.gestureMode = mode
         } else {
             self.gestureMode = .fourFinger
+        }
+
+        if let rawStyle = defaults.string(forKey: Keys.displayStyle),
+           let style = DisplayStyle(rawValue: rawStyle) {
+            self.displayStyle = style
+        } else {
+            self.displayStyle = .compactPanel
         }
 
         let hStep = defaults.double(forKey: Keys.horizontalStep)

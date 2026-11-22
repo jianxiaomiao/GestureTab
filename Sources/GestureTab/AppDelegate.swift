@@ -134,6 +134,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         previewItem.target = self
         menu.addItem(previewItem)
 
+        // 视图显示模式子菜单
+        let styleMenu = NSMenu()
+        for style in DisplayStyle.allCases {
+            let sItem = NSMenuItem(title: style.displayName, action: #selector(selectDisplayStyle(_:)), keyEquivalent: "")
+            sItem.target = self
+            sItem.representedObject = style.rawValue
+            sItem.state = (settings.displayStyle == style) ? .on : .off
+            styleMenu.addItem(sItem)
+        }
+        let styleParent = NSMenuItem(title: "视图显示模式", action: nil, keyEquivalent: "")
+        styleParent.submenu = styleMenu
+        menu.addItem(styleParent)
+
         // 手势模式子菜单
         let modeMenu = NSMenu()
         for mode in GestureMode.allCases {
@@ -216,6 +229,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let raw = sender.representedObject as? String,
            let mode = GestureMode(rawValue: raw) {
             AppSettings.shared.gestureMode = mode
+            rebuildMenu()
+        }
+    }
+
+    @objc private func selectDisplayStyle(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String,
+           let style = DisplayStyle(rawValue: raw) {
+            AppSettings.shared.displayStyle = style
             rebuildMenu()
         }
     }

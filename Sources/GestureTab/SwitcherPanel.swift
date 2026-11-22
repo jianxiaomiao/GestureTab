@@ -19,11 +19,19 @@ final class SwitcherController {
 
     func show() {
         let items = WindowService.shared.fetchAllSwitchableWindows()
-        let cols = AppSettings.shared.columnsCount
-        viewModel.load(items: items, columns: cols)
+        let settings = AppSettings.shared
+        let screen = screenUnderMouse() ?? NSScreen.main ?? NSScreen.screens.first
+        let screenSize = screen?.frame.size ?? CGSize(width: 1440, height: 900)
+
+        viewModel.load(
+            items: items,
+            screenSize: screenSize,
+            style: settings.displayStyle,
+            preferredColumns: settings.columnsCount
+        )
 
         ensurePanel()
-        layoutAndShowPanel()
+        layoutAndShowPanel(on: screen, style: settings.displayStyle)
         isVisible = true
         installKeyMonitors()
 
@@ -92,19 +100,24 @@ final class SwitcherController {
         self.panel = newPanel
     }
 
-    private func layoutAndShowPanel() {
+    private func layoutAndShowPanel(on screen: NSScreen?, style: DisplayStyle) {
         guard let panel, let hostingView else { return }
-        hostingView.layoutSubtreeIfNeeded()
-        let fitting = hostingView.fittingSize
-        let screen = screenUnderMouse() ?? NSScreen.main ?? NSScreen.screens.first
-        let visibleFrame = screen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let targetScreen = screen ?? screenUnderMouse() ?? NSScreen.main ?? NSScreen.screens.first
+        let visibleFrame = targetScreen?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
 
-        let width = min(fitting.width, visibleFrame.width - 40)
-        let height = min(fitting.height, visibleFrame.height - 60)
-        let originX = visibleFrame.midX - width / 2
-        let originY = visibleFrame.midY - height / 2
+        switch style {
+        case .compactPanel:
+            hostingView.layoutSubtreeIfNeeded()
+            let fitting = hostingView.fittingSize
+            let width = min(fitting.width, visibleFrame.width - 32)
+            let height = min(fitting.height, visibleFrame.height - 40)
+            let originX = visibleFrame.midX - width / 2
+            let originY = visibleFrame.midY - height / 2
+            panel.setFrame(NSRect(x: originX, y: originY, width: width, height: height), display: true)
 
-        panel.setFrame(NSRect(x: originX, y: originY, width: width, height: height), display: true)
+        case .missionControl:
+            panel.setFrame(visibleFrame, display: true)
+        }
         panel.orderFrontRegardless()
     }
 
