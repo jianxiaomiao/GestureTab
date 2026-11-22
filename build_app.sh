@@ -60,3 +60,8 @@ else
 fi
 
 echo "✅ 打包完成 (Universal Binary): $APP_DIR"
+
+ZIP_PATH="$SCRIPT_DIR/GestureTab.app.zip"
+rm -f "$ZIP_PATH"
+ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
+echo "✅ 已生成 Release 压缩包: $ZIP_PATH"

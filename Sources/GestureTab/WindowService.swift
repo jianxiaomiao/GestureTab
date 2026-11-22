@@ -235,7 +235,13 @@ final class WindowService {
         }
 
         let regularApps = NSWorkspace.shared.runningApplications.filter {
-            $0.activationPolicy == .regular && $0.processIdentifier != selfPID && !$0.isTerminated
+            guard $0.activationPolicy == .regular,
+                  $0.processIdentifier != selfPID,
+                  !$0.isTerminated else {
+                return false
+            }
+            let key = $0.bundleIdentifier ?? $0.localizedName ?? "App"
+            return !AppSettings.shared.isAppIgnored(key: key)
         }
 
         var itemsByID: [CGWindowID: WindowItem] = [:]
@@ -636,6 +642,25 @@ final class WindowService {
             return app.terminate()
         }
         return false
+    }
+
+    /// 切换指定窗口的最小化状态，返回操作后的最新 isMinimized 值；失败返回 nil
+    func toggleMinimizeWindow(_ item: WindowItem) -> Bool? {
+        guard !item.isFullScreen else { return nil }
+        let targetAX: AXUIElement? = item.axElement ?? findAXWindow(pid: item.pid, windowID: item.id)
+        guard let ax = targetAX else { return nil }
+
+        var minRef: CFTypeRef?
+        let currentMin: Bool
+        if AXUIElementCopyAttributeValue(ax, kAXMinimizedAttribute as CFString, &minRef) == .success {
+            currentMin = (minRef as? Bool) ?? item.isMinimized
+        } else {
+            currentMin = item.isMinimized
+        }
+
+        let nextMin = !currentMin
+        let err = AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, nextMin as CFBoolean)
+        return err == .success ? nextMin : nil
     }
 
     private func getCachedAXElement(for windowID: CGWindowID) -> AXUIElement? {

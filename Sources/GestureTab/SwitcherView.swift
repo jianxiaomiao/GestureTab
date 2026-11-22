@@ -9,18 +9,31 @@ final class SwitcherViewModel: ObservableObject {
     @Published var cardWidth: CGFloat = 196
     @Published var cardHeight: CGFloat = 146
     @Published var gridSpacing: CGFloat = 12
+    @Published var isPersistentSession: Bool = false
 
     var selectedItem: WindowItem? {
         guard items.indices.contains(selectedIndex) else { return nil }
         return items[selectedIndex]
     }
 
-    func load(items: [WindowItem], screenSize: CGSize, style: DisplayStyle, preferredColumns: Int) {
+    func load(
+        items: [WindowItem],
+        screenSize: CGSize,
+        style: DisplayStyle,
+        preferredColumns: Int,
+        persistent: Bool = false,
+        reverseInitial: Bool = false
+    ) {
         self.items = items
         self.displayStyle = style
+        self.isPersistentSession = persistent
         computeLayout(for: items.count, screenSize: screenSize, style: style, preferredColumns: preferredColumns)
-        // 默认选中第 2 个窗口（即上一个使用的窗口），只有一个窗口时选中第 0 个
-        self.selectedIndex = items.count > 1 ? 1 : 0
+        if reverseInitial {
+            self.selectedIndex = max(0, items.count - 1)
+        } else {
+            // 默认选中第 2 个窗口（即上一个使用的窗口），只有一个窗口时选中第 0 个
+            self.selectedIndex = items.count > 1 ? 1 : 0
+        }
     }
 
     private func computeLayout(for count: Int, screenSize: CGSize, style: DisplayStyle, preferredColumns: Int) {
@@ -146,6 +159,12 @@ final class SwitcherViewModel: ObservableObject {
             selectedIndex = 0
         }
     }
+
+    func setMinimized(windowID: CGWindowID, isMinimized: Bool) {
+        if let idx = items.firstIndex(where: { $0.id == windowID }) {
+            items[idx].isMinimized = isMinimized
+        }
+    }
 }
 
 struct VisualEffectBackdrop: NSViewRepresentable {
@@ -220,7 +239,9 @@ struct SwitcherView: View {
                             .truncationMode(.tail)
                     }
                     Spacer()
-                    Text("滑动选窗口 · 松手切入 · \(settings.qKeyAction.shortHint) · Esc 取消")
+                    Text(viewModel.isPersistentSession
+                         ? "方向键/Tab/滑动选窗口 · 回车/空格/点击进入 · \(settings.qKeyAction.shortHint) · M 最小化 · Esc 取消"
+                         : "滑动选窗口 · 松手切入 · \(settings.qKeyAction.shortHint) · M 最小化 · Esc 取消")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -285,7 +306,9 @@ struct SwitcherView: View {
 
                 Spacer(minLength: 4)
 
-                Text("触控板滑动选择窗口 · 松手立即进入 · \(settings.qKeyAction.shortHint) · Esc 取消")
+                Text(viewModel.isPersistentSession
+                     ? "方向键/Tab/滑动选窗口 · 回车/空格/点击立即进入 · \(settings.qKeyAction.shortHint) · M 最小化 · Esc 取消"
+                     : "触控板滑动选择窗口 · 松手立即进入 · \(settings.qKeyAction.shortHint) · M 最小化 · Esc 取消")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.72))
                     .padding(.bottom, 20)

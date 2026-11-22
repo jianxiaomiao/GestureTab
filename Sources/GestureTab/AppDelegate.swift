@@ -40,10 +40,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         multitouch.onShowSwitcher = { [weak self] in
             self?.switcher.show()
         }
+        multitouch.onShowPersistentSwitcher = { [weak self] reverse in
+            self?.switcher.show(persistent: true, reverseInitial: reverse)
+        }
         multitouch.onStep = { [weak self] dx, dy in
             self?.switcher.step(deltaCol: dx, deltaRow: dy)
         }
         multitouch.onCommit = { [weak self] in
+            self?.switcher.commitOnTrackpadRelease()
+        }
+        multitouch.onForceCommit = { [weak self] in
             self?.switcher.commitAndHide()
         }
         multitouch.onCancel = { [weak self] in
@@ -51,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         multitouch.onPressQ = { [weak self] in
             self?.switcher.performQKeyAction()
+        }
+        multitouch.onPressM = { [weak self] in
+            self?.switcher.performMKeyAction()
         }
         switcher.onUserEscCancel = { [weak self] in
             self?.multitouch.cancelCurrentGesture()
@@ -224,6 +233,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         qParent.submenu = qMenu
         menu.addItem(qParent)
 
+        // 忽略名单子菜单
+        let ignoreMenu = NSMenu()
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let runningApps = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.processIdentifier != selfPID && !$0.isTerminated }
+            .sorted { ($0.localizedName ?? "") < ($1.localizedName ?? "") }
+
+        var seenKeys = Set<String>()
+        for app in runningApps {
+            let name = app.localizedName ?? "App"
+            let key = app.bundleIdentifier ?? name
+            guard seenKeys.insert(key).inserted else { continue }
+            let aItem = NSMenuItem(title: name, action: #selector(toggleIgnoredApp(_:)), keyEquivalent: "")
+            aItem.target = self
+            aItem.representedObject = [key, name]
+            aItem.state = settings.isAppIgnored(key: key) ? .on : .off
+            ignoreMenu.addItem(aItem)
+        }
+
+        // 展示未运行但仍在忽略名单里的应用
+        let offlineIgnored = settings.ignoredApps.filter { !seenKeys.contains($0.key) }
+            .sorted { $0.value < $1.value }
+        if !offlineIgnored.isEmpty {
+            ignoreMenu.addItem(.separator())
+            for (key, name) in offlineIgnored {
+                let aItem = NSMenuItem(title: "\(name)（未运行）", action: #selector(toggleIgnoredApp(_:)), keyEquivalent: "")
+                aItem.target = self
+                aItem.representedObject = [key, name]
+                aItem.state = .on
+                ignoreMenu.addItem(aItem)
+            }
+        }
+
+        if !settings.ignoredApps.isEmpty {
+            ignoreMenu.addItem(.separator())
+            let clearItem = NSMenuItem(title: "清空忽略名单", action: #selector(clearIgnoredApps), keyEquivalent: "")
+            clearItem.target = self
+            ignoreMenu.addItem(clearItem)
+        }
+
+        let ignoreTitle = settings.ignoredApps.isEmpty
+            ? "忽略应用名单（过滤不显示）"
+            : "忽略应用名单（已忽略 \(settings.ignoredApps.count) 个）"
+        let ignoreParent = NSMenuItem(title: ignoreTitle, action: nil, keyEquivalent: "")
+        ignoreParent.submenu = ignoreMenu
+        menu.addItem(ignoreParent)
+
+        let optionTabItem = NSMenuItem(title: "启用 Option + Tab 呼出（持久打开）", action: #selector(toggleOptionTab), keyEquivalent: "")
+        optionTabItem.target = self
+        optionTabItem.state = settings.optionTabEnabled ? .on : .off
+        menu.addItem(optionTabItem)
+
+        let persistentItem = NSMenuItem(title: "触控板呼出后保持持久停留（回车/空格进入）", action: #selector(toggleTrackpadPersistent), keyEquivalent: "")
+        persistentItem.target = self
+        persistentItem.state = settings.trackpadPersistentMode ? .on : .off
+        menu.addItem(persistentItem)
+
         let hapticItem = NSMenuItem(title: "切换时触控板震动反馈", action: #selector(toggleHaptic), keyEquivalent: "")
         hapticItem.target = self
         hapticItem.state = settings.hapticEnabled ? .on : .off
@@ -265,7 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func previewSwitcher() {
-        switcher.show()
+        switcher.show(persistent: true)
     }
 
     @objc private func selectGestureMode(_ sender: NSMenuItem) {
@@ -322,6 +388,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleLaunchAtLogin() {
         _ = LaunchAtLoginManager.setEnabled(!LaunchAtLoginManager.isEnabled)
+        rebuildMenu()
+    }
+
+    @objc private func toggleOptionTab() {
+        AppSettings.shared.optionTabEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleTrackpadPersistent() {
+        AppSettings.shared.trackpadPersistentMode.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleIgnoredApp(_ sender: NSMenuItem) {
+        if let pair = sender.representedObject as? [String], pair.count == 2 {
+            AppSettings.shared.toggleIgnoredApp(key: pair[0], name: pair[1])
+            rebuildMenu()
+        }
+    }
+
+    @objc private func clearIgnoredApps() {
+        AppSettings.shared.ignoredApps.removeAll()
         rebuildMenu()
     }
 

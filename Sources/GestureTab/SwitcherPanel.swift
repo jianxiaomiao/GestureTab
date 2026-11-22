@@ -20,9 +20,13 @@ final class SwitcherController {
 
     private(set) var isVisible = false
 
-    func show() {
+    func show(persistent: Bool? = nil, reverseInitial: Bool = false) {
+        // 若面板已经处于打开状态（如先由 Option+Tab 持久打开，再结合触控板滑动选窗），不重置当前列表与选中项
+        if isVisible { return }
+
         let items = WindowService.shared.fetchAllSwitchableWindows()
         let settings = AppSettings.shared
+        let isPersistent = persistent ?? settings.trackpadPersistentMode
         let screen = screenUnderMouse() ?? NSScreen.main ?? NSScreen.screens.first
         let screenSize = screen?.frame.size ?? CGSize(width: 1440, height: 900)
 
@@ -30,7 +34,9 @@ final class SwitcherController {
             items: items,
             screenSize: screenSize,
             style: settings.displayStyle,
-            preferredColumns: settings.columnsCount
+            preferredColumns: settings.columnsCount,
+            persistent: isPersistent,
+            reverseInitial: reverseInitial
         )
 
         ensurePanel()
@@ -109,6 +115,23 @@ final class SwitcherController {
     func cancelAndHide() {
         guard isVisible else { return }
         hide()
+    }
+
+    /// 触控板松手回调：非持久模式下立即切入；持久模式下保持打开等待 Enter/空格/点击或 Esc
+    func commitOnTrackpadRelease() {
+        guard isVisible, !viewModel.isPersistentSession else { return }
+        commitAndHide()
+    }
+
+    /// 按 M 键一键最小化或恢复当前选中窗口
+    func performMKeyAction() {
+        guard isVisible, let target = viewModel.selectedItem else { return }
+        if let newMinimized = WindowService.shared.toggleMinimizeWindow(target) {
+            viewModel.setMinimized(windowID: target.id, isMinimized: newMinimized)
+            if AppSettings.shared.hapticEnabled {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            }
+        }
     }
 
     /// 按 Q 键执行关闭选中窗口或退出选中程序
@@ -247,6 +270,18 @@ final class SwitcherController {
                 self?.performQKeyAction()
             }
             return true
+        case 46: // M 最小化或恢复窗口
+            guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+                return false
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.performMKeyAction()
+            }
+            return true
+        case 48: // Tab / Shift+Tab
+            let reverse = event.modifierFlags.contains(.shift)
+            step(deltaCol: reverse ? -1 : 1, deltaRow: 0)
+            return true
         case 123: // Left Arrow
             step(deltaCol: -1, deltaRow: 0)
             return true
@@ -259,7 +294,7 @@ final class SwitcherController {
         case 126: // Up Arrow
             step(deltaCol: 0, deltaRow: -1)
             return true
-        case 36: // Return
+        case 36, 76, 49: // Return / Numpad Enter / Space
             commitAndHide()
             return true
         default:

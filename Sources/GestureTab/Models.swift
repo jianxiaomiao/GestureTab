@@ -76,10 +76,14 @@ struct WindowItem: Identifiable {
     let appIcon: NSImage?
     let axElement: AXUIElement?
     let runningApp: NSRunningApplication?
-    let isMinimized: Bool
+    var isMinimized: Bool
     let isFullScreen: Bool
     let isOnScreen: Bool
     var thumbnail: NSImage?
+
+    var ignoreKey: String {
+        runningApp?.bundleIdentifier ?? appName
+    }
 
     var displayTitle: String {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -102,6 +106,9 @@ final class AppSettings: ObservableObject {
         static let hapticEnabled = "hapticEnabled"
         static let autoRepeatEnabled = "autoRepeatEnabled"
         static let velocityBoostEnabled = "velocityBoostEnabled"
+        static let optionTabEnabled = "optionTabEnabled"
+        static let trackpadPersistentMode = "trackpadPersistentMode"
+        static let ignoredApps = "ignoredApps"
     }
 
     @Published var gestureMode: GestureMode {
@@ -144,6 +151,33 @@ final class AppSettings: ObservableObject {
     /// 速度甩动加成（慢滑精准 1 格，快滑自动跨 2~3 格）
     @Published var velocityBoostEnabled: Bool {
         didSet { UserDefaults.standard.set(velocityBoostEnabled, forKey: Keys.velocityBoostEnabled) }
+    }
+
+    /// 启用 Option + Tab 辅助快捷键呼出（默认开启，持久打开直到按 Enter/空格进入或 Esc 退出）
+    @Published var optionTabEnabled: Bool {
+        didSet { UserDefaults.standard.set(optionTabEnabled, forKey: Keys.optionTabEnabled) }
+    }
+
+    /// 触控板呼出后是否也保持持久停留（默认关闭，松手即切入；开启后松手不切，需按 Enter/空格/点击进入）
+    @Published var trackpadPersistentMode: Bool {
+        didSet { UserDefaults.standard.set(trackpadPersistentMode, forKey: Keys.trackpadPersistentMode) }
+    }
+
+    /// 忽略名单（key = bundleIdentifier 或 appName, value = 展示名称）
+    @Published var ignoredApps: [String: String] {
+        didSet { UserDefaults.standard.set(ignoredApps, forKey: Keys.ignoredApps) }
+    }
+
+    func isAppIgnored(key: String) -> Bool {
+        ignoredApps[key] != nil
+    }
+
+    func toggleIgnoredApp(key: String, name: String) {
+        if ignoredApps[key] != nil {
+            ignoredApps.removeValue(forKey: key)
+        } else {
+            ignoredApps[key] = name
+        }
     }
 
     private init() {
@@ -201,6 +235,20 @@ final class AppSettings: ObservableObject {
         } else {
             self.velocityBoostEnabled = true
         }
+
+        if defaults.object(forKey: Keys.optionTabEnabled) != nil {
+            self.optionTabEnabled = defaults.bool(forKey: Keys.optionTabEnabled)
+        } else {
+            self.optionTabEnabled = true
+        }
+
+        if defaults.object(forKey: Keys.trackpadPersistentMode) != nil {
+            self.trackpadPersistentMode = defaults.bool(forKey: Keys.trackpadPersistentMode)
+        } else {
+            self.trackpadPersistentMode = false
+        }
+
+        self.ignoredApps = (defaults.dictionary(forKey: Keys.ignoredApps) as? [String: String]) ?? [:]
     }
 }
 

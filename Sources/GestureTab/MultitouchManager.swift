@@ -84,10 +84,13 @@ final class MultitouchManager {
     }
 
     var onShowSwitcher: (() -> Void)?
+    var onShowPersistentSwitcher: ((_ reverse: Bool) -> Void)?
     var onStep: ((_ deltaCol: Int, _ deltaRow: Int) -> Void)?
     var onCommit: (() -> Void)?
+    var onForceCommit: (() -> Void)?
     var onCancel: (() -> Void)?
     var onPressQ: (() -> Void)?
+    var onPressM: (() -> Void)?
 
     private var frameworkHandle: UnsafeMutableRawPointer?
     private var devices: [UnsafeMutableRawPointer] = []
@@ -700,12 +703,26 @@ final class MultitouchManager {
                 let visible = manager.isSwitcherVisibleFlag
                 manager.lock.unlock()
 
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                let flags = event.flags
+                let hasCmdOrCtrl = flags.contains(.maskCommand) || flags.contains(.maskControl)
+                let hasOption = flags.contains(.maskAlternate)
+
+                // Option + Tab / Option + Shift + Tab 呼出持久模式或在已打开时步进
+                if AppSettings.shared.optionTabEnabled && keyCode == 48 && hasOption && !hasCmdOrCtrl {
+                    let reverse = flags.contains(.maskShift)
+                    DispatchQueue.main.async {
+                        if visible {
+                            manager.onStep?(reverse ? -1 : 1, 0)
+                        } else {
+                            manager.onShowPersistentSwitcher?(reverse)
+                        }
+                    }
+                    return nil
+                }
+
                 if visible {
-                    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-                    let flags = event.flags
-                    let hasModifier = flags.contains(.maskCommand)
-                        || flags.contains(.maskControl)
-                        || flags.contains(.maskAlternate)
+                    let hasModifier = hasCmdOrCtrl || hasOption
 
                     if !hasModifier {
                         switch keyCode {
@@ -714,9 +731,20 @@ final class MultitouchManager {
                                 manager.cancelCurrentGesture()
                             }
                             return nil
+                        case 48: // Tab / Shift+Tab 在持久面板内切下一个/上一个
+                            let reverse = flags.contains(.maskShift)
+                            DispatchQueue.main.async {
+                                manager.onStep?(reverse ? -1 : 1, 0)
+                            }
+                            return nil
                         case 12: // Q 关闭窗口或退出程序
                             DispatchQueue.main.async {
                                 manager.onPressQ?()
+                            }
+                            return nil
+                        case 46: // M 最小化或恢复窗口
+                            DispatchQueue.main.async {
+                                manager.onPressM?()
                             }
                             return nil
                         case 123: // Left
@@ -739,9 +767,9 @@ final class MultitouchManager {
                                 manager.onStep?(0, -1)
                             }
                             return nil
-                        case 36: // Return 确认切换
+                        case 36, 76, 49: // Return / Numpad Enter / Space 确认进入窗口
                             DispatchQueue.main.async {
-                                manager.onCommit?()
+                                manager.onForceCommit?()
                             }
                             return nil
                         default:
