@@ -39,32 +39,13 @@ enum DisplayStyle: String, CaseIterable, Identifiable {
     }
 }
 
-/// 选中窗口时按 Q 键执行的操作
-enum QKeyAction: String, CaseIterable, Identifiable {
-    /// 关闭当前高亮选中的单个窗口
-    case closeWindow = "closeWindow"
-    /// 退出当前高亮窗口所属的整个程序
-    case quitApp = "quitApp"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .closeWindow:
-            return "关闭当前选中窗口"
-        case .quitApp:
-            return "退出选中窗口所属程序"
-        }
-    }
-
-    var shortHint: String {
-        switch self {
-        case .closeWindow:
-            return "Q 关闭窗口"
-        case .quitApp:
-            return "Q 退出程序"
-        }
-    }
+/// 本机已安装应用信息（用于忽略名单配置）
+struct InstalledAppInfo: Identifiable, Hashable {
+    let id: String // bundleIdentifier 或 appName
+    let name: String
+    let bundleID: String?
+    let url: URL
+    let icon: NSImage?
 }
 
 /// 单个可切换窗口的数据模型
@@ -99,7 +80,9 @@ final class AppSettings: ObservableObject {
         static let settingsVersion = "settingsVersion"
         static let gestureMode = "gestureMode"
         static let displayStyle = "displayStyle"
-        static let qKeyAction = "qKeyAction"
+        static let qQuitEnabled = "qQuitEnabled"
+        static let wCloseEnabled = "wCloseEnabled"
+        static let mMinimizeEnabled = "mMinimizeEnabled"
         static let horizontalStep = "horizontalStep"
         static let verticalStep = "verticalStep"
         static let columnsCount = "columnsCount"
@@ -119,8 +102,19 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(displayStyle.rawValue, forKey: Keys.displayStyle) }
     }
 
-    @Published var qKeyAction: QKeyAction {
-        didSet { UserDefaults.standard.set(qKeyAction.rawValue, forKey: Keys.qKeyAction) }
+    /// 按 Q 键关闭选中窗口所属进程（程序）
+    @Published var qQuitEnabled: Bool {
+        didSet { UserDefaults.standard.set(qQuitEnabled, forKey: Keys.qQuitEnabled) }
+    }
+
+    /// 按 W 键关闭当前选中的单个窗口
+    @Published var wCloseEnabled: Bool {
+        didSet { UserDefaults.standard.set(wCloseEnabled, forKey: Keys.wCloseEnabled) }
+    }
+
+    /// 按 M 键最小化 / 恢复当前选中的窗口
+    @Published var mMinimizeEnabled: Bool {
+        didSet { UserDefaults.standard.set(mMinimizeEnabled, forKey: Keys.mMinimizeEnabled) }
     }
 
     /// 水平方向每步进一格所需的归一化触控板位移（默认 0.095，约半块触控板可覆盖 5~6 列）
@@ -172,6 +166,19 @@ final class AppSettings: ObservableObject {
         ignoredApps[key] != nil
     }
 
+    func isAppIgnored(bundleID: String?, appName: String) -> Bool {
+        if let bundleID, ignoredApps[bundleID] != nil {
+            return true
+        }
+        if ignoredApps[appName] != nil {
+            return true
+        }
+        let lowerName = appName.lowercased()
+        return ignoredApps.contains { key, val in
+            key.lowercased() == lowerName || val.lowercased() == lowerName
+        }
+    }
+
     func toggleIgnoredApp(key: String, name: String) {
         if ignoredApps[key] != nil {
             ignoredApps.removeValue(forKey: key)
@@ -202,11 +209,22 @@ final class AppSettings: ObservableObject {
             self.displayStyle = .compactPanel
         }
 
-        if let rawQ = defaults.string(forKey: Keys.qKeyAction),
-           let qAction = QKeyAction(rawValue: rawQ) {
-            self.qKeyAction = qAction
+        if defaults.object(forKey: Keys.qQuitEnabled) != nil {
+            self.qQuitEnabled = defaults.bool(forKey: Keys.qQuitEnabled)
         } else {
-            self.qKeyAction = .closeWindow
+            self.qQuitEnabled = true
+        }
+
+        if defaults.object(forKey: Keys.wCloseEnabled) != nil {
+            self.wCloseEnabled = defaults.bool(forKey: Keys.wCloseEnabled)
+        } else {
+            self.wCloseEnabled = true
+        }
+
+        if defaults.object(forKey: Keys.mMinimizeEnabled) != nil {
+            self.mMinimizeEnabled = defaults.bool(forKey: Keys.mMinimizeEnabled)
+        } else {
+            self.mMinimizeEnabled = true
         }
 
         let hStep = defaults.double(forKey: Keys.horizontalStep)
@@ -312,6 +330,91 @@ enum LaunchAtLoginManager {
             return true
         } catch {
             return false
+        }
+    }
+}
+
+/// 扫描本机已安装的应用程序（含 /Applications、系统应用及当前运行的应用）
+enum InstalledAppScanner {
+    static func scanInstalledApps() -> [InstalledAppInfo] {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let searchRoots: [URL] = [
+            URL(fileURLWithPath: "/Applications"),
+            home.appendingPathComponent("Applications", isDirectory: true),
+            URL(fileURLWithPath: "/System/Applications"),
+            URL(fileURLWithPath: "/System/Applications/Utilities")
+        ]
+
+        var byID: [String: InstalledAppInfo] = [:]
+        let selfBundleID = Bundle.main.bundleIdentifier
+
+        for root in searchRoots {
+            guard fm.fileExists(atPath: root.path) else { continue }
+            collectApps(in: root, depth: 0, maxDepth: 2, selfBundleID: selfBundleID, into: &byID)
+        }
+
+        // 合并当前正在运行但可能存放在其他目录的应用
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            guard let url = app.bundleURL else { continue }
+            let bundleID = app.bundleIdentifier
+            if let bundleID, bundleID == selfBundleID { continue }
+            let name = app.localizedName ?? url.deletingPathExtension().lastPathComponent
+            let key = bundleID ?? name
+            if byID[key] == nil {
+                byID[key] = InstalledAppInfo(
+                    id: key,
+                    name: name,
+                    bundleID: bundleID,
+                    url: url,
+                    icon: app.icon ?? NSWorkspace.shared.icon(forFile: url.path)
+                )
+            }
+        }
+
+        return byID.values.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private static func collectApps(
+        in dir: URL,
+        depth: Int,
+        maxDepth: Int,
+        selfBundleID: String?,
+        into map: inout [String: InstalledAppInfo]
+    ) {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        for url in contents {
+            if url.pathExtension == "app" {
+                let bundle = Bundle(url: url)
+                let bundleID = bundle?.bundleIdentifier
+                if let bundleID, bundleID == selfBundleID { continue }
+                let displayName = fm.displayName(atPath: url.path)
+                    .replacingOccurrences(of: ".app", with: "")
+                let infoName = (bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                    ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                    ?? displayName
+                let name = displayName.isEmpty ? infoName : displayName
+                let key = bundleID ?? name
+                if map[key] == nil {
+                    let icon = NSWorkspace.shared.icon(forFile: url.path)
+                    map[key] = InstalledAppInfo(id: key, name: name, bundleID: bundleID, url: url, icon: icon)
+                }
+            } else if depth < maxDepth {
+                let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                if isDir {
+                    collectApps(in: url, depth: depth + 1, maxDepth: maxDepth, selfBundleID: selfBundleID, into: &map)
+                }
+            }
         }
     }
 }

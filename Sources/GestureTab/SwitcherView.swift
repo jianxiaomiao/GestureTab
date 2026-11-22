@@ -239,9 +239,7 @@ struct SwitcherView: View {
                             .truncationMode(.tail)
                     }
                     Spacer()
-                    Text(viewModel.isPersistentSession
-                         ? "方向键/Tab/滑动选窗口 · 回车/空格/点击进入 · \(settings.qKeyAction.shortHint) · M 最小化 · Esc 取消"
-                         : "滑动选窗口 · 松手切入 · \(settings.qKeyAction.shortHint) · M 最小化 · Esc 取消")
+                    Text(hintText(compact: true))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -306,14 +304,28 @@ struct SwitcherView: View {
 
                 Spacer(minLength: 4)
 
-                Text(viewModel.isPersistentSession
-                     ? "方向键/Tab/滑动选窗口 · 回车/空格/点击立即进入 · \(settings.qKeyAction.shortHint) · M 最小化 · Esc 取消"
-                     : "触控板滑动选择窗口 · 松手立即进入 · \(settings.qKeyAction.shortHint) · M 最小化 · Esc 取消")
+                Text(hintText(compact: false))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.72))
                     .padding(.bottom, 20)
             }
         }
+    }
+
+    private func hintText(compact: Bool) -> String {
+        var parts: [String] = []
+        if viewModel.isPersistentSession {
+            parts.append("方向键/Tab/滑动选窗口")
+            parts.append(compact ? "回车/空格/点击进入" : "回车/空格/点击立即进入")
+        } else {
+            parts.append(compact ? "滑动选窗口" : "触控板滑动选择窗口")
+            parts.append(compact ? "松手切入" : "松手立即进入")
+        }
+        if settings.qQuitEnabled { parts.append("Q 退出程序") }
+        if settings.wCloseEnabled { parts.append("W 关闭窗口") }
+        if settings.mMinimizeEnabled { parts.append("M 最小化") }
+        parts.append("Esc 取消")
+        return parts.joined(separator: " · ")
     }
 
     private func emptyStateView(darkText: Bool) -> some View {

@@ -90,6 +90,7 @@ final class MultitouchManager {
     var onForceCommit: (() -> Void)?
     var onCancel: (() -> Void)?
     var onPressQ: (() -> Void)?
+    var onPressW: (() -> Void)?
     var onPressM: (() -> Void)?
 
     private var frameworkHandle: UnsafeMutableRawPointer?
@@ -737,16 +738,27 @@ final class MultitouchManager {
                                 manager.onStep?(reverse ? -1 : 1, 0)
                             }
                             return nil
-                        case 12: // Q 关闭窗口或退出程序
-                            DispatchQueue.main.async {
-                                manager.onPressQ?()
+                        case 12: // Q 退出选中进程（程序）
+                            if AppSettings.shared.qQuitEnabled {
+                                DispatchQueue.main.async {
+                                    manager.onPressQ?()
+                                }
+                                return nil
                             }
-                            return nil
+                        case 13: // W 关闭当前选中窗口
+                            if AppSettings.shared.wCloseEnabled {
+                                DispatchQueue.main.async {
+                                    manager.onPressW?()
+                                }
+                                return nil
+                            }
                         case 46: // M 最小化或恢复窗口
-                            DispatchQueue.main.async {
-                                manager.onPressM?()
+                            if AppSettings.shared.mMinimizeEnabled {
+                                DispatchQueue.main.async {
+                                    manager.onPressM?()
+                                }
+                                return nil
                             }
-                            return nil
                         case 123: // Left
                             DispatchQueue.main.async {
                                 manager.onStep?(-1, 0)

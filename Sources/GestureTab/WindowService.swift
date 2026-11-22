@@ -240,8 +240,8 @@ final class WindowService {
                   !$0.isTerminated else {
                 return false
             }
-            let key = $0.bundleIdentifier ?? $0.localizedName ?? "App"
-            return !AppSettings.shared.isAppIgnored(key: key)
+            let name = $0.localizedName ?? "App"
+            return !AppSettings.shared.isAppIgnored(bundleID: $0.bundleIdentifier, appName: name)
         }
 
         var itemsByID: [CGWindowID: WindowItem] = [:]

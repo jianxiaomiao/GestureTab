@@ -125,7 +125,9 @@ final class SwitcherController {
 
     /// 按 M 键一键最小化或恢复当前选中窗口
     func performMKeyAction() {
-        guard isVisible, let target = viewModel.selectedItem else { return }
+        guard AppSettings.shared.mMinimizeEnabled,
+              isVisible,
+              let target = viewModel.selectedItem else { return }
         if let newMinimized = WindowService.shared.toggleMinimizeWindow(target) {
             viewModel.setMinimized(windowID: target.id, isMinimized: newMinimized)
             if AppSettings.shared.hapticEnabled {
@@ -134,26 +136,36 @@ final class SwitcherController {
         }
     }
 
-    /// 按 Q 键执行关闭选中窗口或退出选中程序
+    /// 按 Q 键关闭/退出选中窗口所属进程（程序）
     func performQKeyAction() {
-        guard isVisible, let target = viewModel.selectedItem else { return }
+        guard AppSettings.shared.qQuitEnabled,
+              isVisible,
+              let target = viewModel.selectedItem else { return }
         cancelPendingSteps()
 
-        let action = AppSettings.shared.qKeyAction
-        switch action {
-        case .closeWindow:
-            if WindowService.shared.closeWindow(target) {
-                viewModel.removeItem(id: target.id)
-                if AppSettings.shared.hapticEnabled {
-                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-                }
+        if WindowService.shared.quitApp(target) {
+            viewModel.removeItems(pid: target.pid)
+            if AppSettings.shared.hapticEnabled {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
             }
-        case .quitApp:
-            if WindowService.shared.quitApp(target) {
-                viewModel.removeItems(pid: target.pid)
-                if AppSettings.shared.hapticEnabled {
-                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-                }
+        }
+
+        if viewModel.items.isEmpty {
+            onUserEscCancel?()
+        }
+    }
+
+    /// 按 W 键关闭当前选中的单个窗口
+    func performWKeyAction() {
+        guard AppSettings.shared.wCloseEnabled,
+              isVisible,
+              let target = viewModel.selectedItem else { return }
+        cancelPendingSteps()
+
+        if WindowService.shared.closeWindow(target) {
+            viewModel.removeItem(id: target.id)
+            if AppSettings.shared.hapticEnabled {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
             }
         }
 
@@ -262,16 +274,27 @@ final class SwitcherController {
                 self?.onUserEscCancel?()
             }
             return true
-        case 12: // Q 关闭窗口或退出程序
-            guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+        case 12: // Q 退出选中程序
+            guard AppSettings.shared.qQuitEnabled,
+                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
                 return false
             }
             DispatchQueue.main.async { [weak self] in
                 self?.performQKeyAction()
             }
             return true
+        case 13: // W 关闭当前窗口
+            guard AppSettings.shared.wCloseEnabled,
+                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+                return false
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.performWKeyAction()
+            }
+            return true
         case 46: // M 最小化或恢复窗口
-            guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+            guard AppSettings.shared.mMinimizeEnabled,
+                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
                 return false
             }
             DispatchQueue.main.async { [weak self] in

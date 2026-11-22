@@ -58,6 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         multitouch.onPressQ = { [weak self] in
             self?.switcher.performQKeyAction()
         }
+        multitouch.onPressW = { [weak self] in
+            self?.switcher.performWKeyAction()
+        }
         multitouch.onPressM = { [weak self] in
             self?.switcher.performMKeyAction()
         }
@@ -220,21 +223,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         colParent.submenu = colMenu
         menu.addItem(colParent)
 
-        // 按 Q 键操作子菜单
-        let qMenu = NSMenu()
-        for qAct in QKeyAction.allCases {
-            let qItem = NSMenuItem(title: qAct.displayName, action: #selector(selectQKeyAction(_:)), keyEquivalent: "")
-            qItem.target = self
-            qItem.representedObject = qAct.rawValue
-            qItem.state = (settings.qKeyAction == qAct) ? .on : .off
-            qMenu.addItem(qItem)
-        }
-        let qParent = NSMenuItem(title: "选中窗口按 Q 键操作", action: nil, keyEquivalent: "")
-        qParent.submenu = qMenu
-        menu.addItem(qParent)
+        // 视图内快捷键开关子菜单
+        let keyMenu = NSMenu()
+        let qToggle = NSMenuItem(title: "按 Q 键：退出选中窗口所属程序（进程）", action: #selector(toggleQQuit), keyEquivalent: "")
+        qToggle.target = self
+        qToggle.state = settings.qQuitEnabled ? .on : .off
+        keyMenu.addItem(qToggle)
+
+        let wToggle = NSMenuItem(title: "按 W 键：关闭当前选中窗口", action: #selector(toggleWClose), keyEquivalent: "")
+        wToggle.target = self
+        wToggle.state = settings.wCloseEnabled ? .on : .off
+        keyMenu.addItem(wToggle)
+
+        let mToggle = NSMenuItem(title: "按 M 键：最小化 / 恢复当前窗口", action: #selector(toggleMMinimize), keyEquivalent: "")
+        mToggle.target = self
+        mToggle.state = settings.mMinimizeEnabled ? .on : .off
+        keyMenu.addItem(mToggle)
+
+        let keyParent = NSMenuItem(title: "选中窗口快捷键（Q / W / M）", action: nil, keyEquivalent: "")
+        keyParent.submenu = keyMenu
+        menu.addItem(keyParent)
 
         // 忽略名单子菜单
         let ignoreMenu = NSMenu()
+        let manageIgnoreItem = NSMenuItem(title: "管理全部已安装应用 / 手动添加...", action: #selector(openIgnoreListManager), keyEquivalent: "")
+        manageIgnoreItem.target = self
+        ignoreMenu.addItem(manageIgnoreItem)
+        ignoreMenu.addItem(.separator())
+
         let selfPID = ProcessInfo.processInfo.processIdentifier
         let runningApps = NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular && $0.processIdentifier != selfPID && !$0.isTerminated }
@@ -363,12 +379,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
-    @objc private func selectQKeyAction(_ sender: NSMenuItem) {
-        if let raw = sender.representedObject as? String,
-           let action = QKeyAction(rawValue: raw) {
-            AppSettings.shared.qKeyAction = action
-            rebuildMenu()
-        }
+    @objc private func toggleQQuit() {
+        AppSettings.shared.qQuitEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleWClose() {
+        AppSettings.shared.wCloseEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleMMinimize() {
+        AppSettings.shared.mMinimizeEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func openIgnoreListManager() {
+        IgnoreListWindowController.shared.show()
     }
 
     @objc private func toggleHaptic() {
