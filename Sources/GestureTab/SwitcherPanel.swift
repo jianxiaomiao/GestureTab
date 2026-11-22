@@ -12,6 +12,7 @@ final class SwitcherController {
     private var hostingView: NSHostingView<SwitcherView>?
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
+    private var pendingStepWorkItems: [DispatchWorkItem] = []
 
     var onUserEscCancel: (() -> Void)?
 
@@ -45,10 +46,50 @@ final class SwitcherController {
 
     func step(deltaCol: Int, deltaRow: Int) {
         guard isVisible else { return }
+        cancelPendingSteps()
+
+        let colSteps = abs(deltaCol)
+        let rowSteps = abs(deltaRow)
+        let totalSteps = max(colSteps, rowSteps)
+        guard totalSteps > 0 else { return }
+
+        if totalSteps == 1 {
+            performSingleStep(deltaCol: deltaCol, deltaRow: deltaRow)
+            return
+        }
+
+        // 多格快滑拆分为 42ms/格 的逐格可见过渡动画，做到“看到蓝框停在哪，松手就进哪”
+        let dirCol = deltaCol == 0 ? 0 : (deltaCol > 0 ? 1 : -1)
+        let dirRow = deltaRow == 0 ? 0 : (deltaRow > 0 ? 1 : -1)
+
+        for i in 0..<totalSteps {
+            let stepC = i < colSteps ? dirCol : 0
+            let stepR = i < rowSteps ? dirRow : 0
+            if i == 0 {
+                performSingleStep(deltaCol: stepC, deltaRow: stepR)
+            } else {
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self, self.isVisible else { return }
+                    self.performSingleStep(deltaCol: stepC, deltaRow: stepR)
+                }
+                pendingStepWorkItems.append(item)
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.042, execute: item)
+            }
+        }
+    }
+
+    private func performSingleStep(deltaCol: Int, deltaRow: Int) {
         if viewModel.moveSelection(deltaCol: deltaCol, deltaRow: deltaRow),
            AppSettings.shared.hapticEnabled {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
         }
+    }
+
+    private func cancelPendingSteps() {
+        for item in pendingStepWorkItems {
+            item.cancel()
+        }
+        pendingStepWorkItems.removeAll()
     }
 
     func commitAndHide() {
@@ -67,6 +108,7 @@ final class SwitcherController {
 
     private func hide() {
         isVisible = false
+        cancelPendingSteps()
         removeKeyMonitors()
         panel?.orderOut(nil)
     }

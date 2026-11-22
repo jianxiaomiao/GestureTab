@@ -109,11 +109,17 @@ final class MultitouchManager {
     private var smoothVelY: Double = 0
     private var lowFingerWorkItem: DispatchWorkItem?
 
-    // 边缘 / 持续推力自动步进状态
+    // 边缘自动步进状态
     private var activeOriginX: Double = 0.5
     private var activeOriginY: Double = 0.5
     private var currentCentroidX: Double = 0.5
     private var currentCentroidY: Double = 0.5
+    private var currentMinX: Double = 0.5
+    private var currentMaxX: Double = 0.5
+    private var currentMinY: Double = 0.5
+    private var currentMaxY: Double = 0.5
+    private var lastMoveDirX: Int = 0
+    private var lastMoveDirY: Int = 0
     private var lastSlideUptime: TimeInterval = 0
     private var lastAutoRepeatUptime: TimeInterval = 0
     private var edgeEnteredUptime: TimeInterval?
@@ -302,8 +308,12 @@ final class MultitouchManager {
             return
         }
 
-        let cx = currentCentroidX
-        let cy = currentCentroidY
+        let minX = currentMinX
+        let maxX = currentMaxX
+        let minY = currentMinY
+        let maxY = currentMaxY
+        let moveDirX = lastMoveDirX
+        let moveDirY = lastMoveDirY
         let lastRepeat = lastAutoRepeatUptime
         let edgeEntered = edgeEnteredUptime
 
@@ -311,19 +321,19 @@ final class MultitouchManager {
         var dirRow = 0
         var holdStartTime = now
         let requiredHoldDelay: TimeInterval = 0.20
-        let repeatInterval: TimeInterval = 0.21
+        let repeatInterval: TimeInterval = 0.20
 
-        // 仅在真正触及触控板最外圈物理边缘（10% 边界区）时才触发边缘连选；
-        // 中间区域停住手指绝对保持静止，不自动偏移。
+        // 只要任意外侧单指触及触控板最外圈 10% 物理边缘，且与最近滑动方向一致，即触发边缘连选；
+        // 中间区域停住手指绝对静止，不自动偏移。
         let edgeMargin = 0.10
-        let inRightEdge = cx >= (1.0 - edgeMargin)
-        let inLeftEdge = cx <= edgeMargin
-        let inTopEdge = cy >= (1.0 - edgeMargin)
-        let inBottomEdge = cy <= edgeMargin
+        let inRightEdge = maxX >= (1.0 - edgeMargin) && moveDirX > 0
+        let inLeftEdge = minX <= edgeMargin && moveDirX < 0
+        let inTopEdge = maxY >= (1.0 - edgeMargin) && moveDirY > 0
+        let inBottomEdge = minY <= edgeMargin && moveDirY < 0
 
         if inRightEdge || inLeftEdge || inTopEdge || inBottomEdge {
-            let edgeDistX = inRightEdge ? (cx - (1.0 - edgeMargin)) : (inLeftEdge ? (edgeMargin - cx) : 0)
-            let edgeDistY = inTopEdge ? (cy - (1.0 - edgeMargin)) : (inBottomEdge ? (edgeMargin - cy) : 0)
+            let edgeDistX = inRightEdge ? (maxX - (1.0 - edgeMargin)) : (inLeftEdge ? (edgeMargin - minX) : 0)
+            let edgeDistY = inTopEdge ? (maxY - (1.0 - edgeMargin)) : (inBottomEdge ? (edgeMargin - minY) : 0)
 
             if edgeDistX >= edgeDistY {
                 dirCol = inRightEdge ? 1 : -1
@@ -370,10 +380,20 @@ final class MultitouchManager {
         var currentMap: [Int32: (x: Float, y: Float)] = [:]
         var sumX: Double = 0
         var sumY: Double = 0
+        var minX: Double = 1.0
+        var maxX: Double = 0.0
+        var minY: Double = 1.0
+        var maxY: Double = 0.0
         for t in touches {
             currentMap[t.id] = (t.x, t.y)
-            sumX += Double(t.x)
-            sumY += Double(t.y)
+            let tx = Double(t.x)
+            let ty = Double(t.y)
+            sumX += tx
+            sumY += ty
+            if tx < minX { minX = tx }
+            if tx > maxX { maxX = tx }
+            if ty < minY { minY = ty }
+            if ty > maxY { maxY = ty }
         }
 
         lock.lock()
@@ -386,6 +406,10 @@ final class MultitouchManager {
         if count > 0 {
             currentCentroidX = sumX / Double(count)
             currentCentroidY = sumY / Double(count)
+            currentMinX = minX
+            currentMaxX = maxX
+            currentMinY = minY
+            currentMaxY = maxY
         }
 
         // 所有手指离开触控板
@@ -401,6 +425,8 @@ final class MultitouchManager {
             prevFrameTimestamp = 0
             smoothVelX = 0
             smoothVelY = 0
+            lastMoveDirX = 0
+            lastMoveDirY = 0
             edgeEnteredUptime = nil
             if isSuppressingInput {
                 scrollBlockGraceUntil = now + 0.18
@@ -455,6 +481,8 @@ final class MultitouchManager {
                 smoothVelY = 0
                 activeOriginX = currentCentroidX
                 activeOriginY = currentCentroidY
+                lastMoveDirX = accX > 0.008 ? 1 : (accX < -0.008 ? -1 : 0)
+                lastMoveDirY = accY > 0.008 ? 1 : (accY < -0.008 ? -1 : 0)
                 lastSlideUptime = now
                 lastAutoRepeatUptime = now
                 edgeEnteredUptime = nil
@@ -525,6 +553,11 @@ final class MultitouchManager {
 
             if hypot(dx, dy) > 0.0025 {
                 lastSlideUptime = now
+                if abs(dx) >= abs(dy), abs(dx) > 0.002 {
+                    lastMoveDirX = dx > 0 ? 1 : -1
+                } else if abs(dy) > 0.002 {
+                    lastMoveDirY = dy > 0 ? 1 : -1
+                }
 
                 // 若手指往当前偏移的反方向回拉，重新锚定起点以立刻停止同向自动步进
                 let offX = currentCentroidX - activeOriginX
