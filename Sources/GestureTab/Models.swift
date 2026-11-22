@@ -72,6 +72,7 @@ final class AppSettings: ObservableObject {
         static let columnsCount = "columnsCount"
         static let hapticEnabled = "hapticEnabled"
         static let autoRepeatEnabled = "autoRepeatEnabled"
+        static let velocityBoostEnabled = "velocityBoostEnabled"
     }
 
     @Published var gestureMode: GestureMode {
@@ -82,12 +83,12 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(displayStyle.rawValue, forKey: Keys.displayStyle) }
     }
 
-    /// 水平方向每步进一格所需的归一化触控板位移（默认 0.135）
+    /// 水平方向每步进一格所需的归一化触控板位移（默认 0.095，约半块触控板可覆盖 5~6 列）
     @Published var horizontalStep: Double {
         didSet { UserDefaults.standard.set(horizontalStep, forKey: Keys.horizontalStep) }
     }
 
-    /// 垂直方向每步进一行所需的归一化触控板位移（默认 0.145）
+    /// 垂直方向每步进一行所需的归一化触控板位移（默认 0.115）
     @Published var verticalStep: Double {
         didSet { UserDefaults.standard.set(verticalStep, forKey: Keys.verticalStep) }
     }
@@ -102,17 +103,22 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(hapticEnabled, forKey: Keys.hapticEnabled) }
     }
 
-    /// 滑到触控板边缘或推开起点持续按住时，是否自动延续方向步进
+    /// 滑到触控板物理边缘按住时，是否自动延续方向步进
     @Published var autoRepeatEnabled: Bool {
         didSet { UserDefaults.standard.set(autoRepeatEnabled, forKey: Keys.autoRepeatEnabled) }
     }
 
+    /// 速度甩动加成（慢滑精准 1 格，快滑自动跨 2~3 格）
+    @Published var velocityBoostEnabled: Bool {
+        didSet { UserDefaults.standard.set(velocityBoostEnabled, forKey: Keys.velocityBoostEnabled) }
+    }
+
     private init() {
         let defaults = UserDefaults.standard
-        if defaults.integer(forKey: Keys.settingsVersion) < 2 {
+        if defaults.integer(forKey: Keys.settingsVersion) < 3 {
             defaults.removeObject(forKey: Keys.horizontalStep)
             defaults.removeObject(forKey: Keys.verticalStep)
-            defaults.set(2, forKey: Keys.settingsVersion)
+            defaults.set(3, forKey: Keys.settingsVersion)
         }
 
         if let raw = defaults.string(forKey: Keys.gestureMode),
@@ -130,10 +136,10 @@ final class AppSettings: ObservableObject {
         }
 
         let hStep = defaults.double(forKey: Keys.horizontalStep)
-        self.horizontalStep = hStep > 0.01 ? hStep : 0.135
+        self.horizontalStep = hStep > 0.01 ? hStep : 0.095
 
         let vStep = defaults.double(forKey: Keys.verticalStep)
-        self.verticalStep = vStep > 0.01 ? vStep : 0.145
+        self.verticalStep = vStep > 0.01 ? vStep : 0.115
 
         let cols = defaults.integer(forKey: Keys.columnsCount)
         self.columnsCount = cols >= 3 ? cols : 6
@@ -148,6 +154,12 @@ final class AppSettings: ObservableObject {
             self.autoRepeatEnabled = defaults.bool(forKey: Keys.autoRepeatEnabled)
         } else {
             self.autoRepeatEnabled = true
+        }
+
+        if defaults.object(forKey: Keys.velocityBoostEnabled) != nil {
+            self.velocityBoostEnabled = defaults.bool(forKey: Keys.velocityBoostEnabled)
+        } else {
+            self.velocityBoostEnabled = true
         }
     }
 }

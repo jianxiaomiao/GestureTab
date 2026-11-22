@@ -103,7 +103,10 @@ final class MultitouchManager {
     private var stepAccumX: Double = 0
     private var stepAccumY: Double = 0
     private var lastStepTimestamp: Double = 0
-    private let stepCooldown: Double = 0.08
+    private var currentStepCooldown: Double = 0.085
+    private var prevFrameTimestamp: Double = 0
+    private var smoothVelX: Double = 0
+    private var smoothVelY: Double = 0
     private var lowFingerWorkItem: DispatchWorkItem?
 
     // 边缘 / 持续推力自动步进状态
@@ -250,6 +253,10 @@ final class MultitouchManager {
         stepAccumX = 0
         stepAccumY = 0
         lastStepTimestamp = 0
+        currentStepCooldown = 0.085
+        prevFrameTimestamp = 0
+        smoothVelX = 0
+        smoothVelY = 0
         edgeEnteredUptime = nil
         isSuppressingInput = false
         suppressedMouseDown = false
@@ -390,6 +397,10 @@ final class MultitouchManager {
             stepAccumX = 0
             stepAccumY = 0
             lastStepTimestamp = 0
+            currentStepCooldown = 0.085
+            prevFrameTimestamp = 0
+            smoothVelX = 0
+            smoothVelY = 0
             edgeEnteredUptime = nil
             if isSuppressingInput {
                 scrollBlockGraceUntil = now + 0.18
@@ -438,6 +449,10 @@ final class MultitouchManager {
                 stepAccumX = 0
                 stepAccumY = 0
                 lastStepTimestamp = timestamp
+                currentStepCooldown = 0.085
+                prevFrameTimestamp = timestamp
+                smoothVelX = 0
+                smoothVelY = 0
                 activeOriginX = currentCentroidX
                 activeOriginY = currentCentroidY
                 lastSlideUptime = now
@@ -469,6 +484,10 @@ final class MultitouchManager {
                             self.stepAccumX = 0
                             self.stepAccumY = 0
                             self.lastStepTimestamp = 0
+                            self.currentStepCooldown = 0.085
+                            self.prevFrameTimestamp = 0
+                            self.smoothVelX = 0
+                            self.smoothVelY = 0
                             self.edgeEnteredUptime = nil
                             self.isSuppressingInput = false
                             self.scrollBlockGraceUntil = ProcessInfo.processInfo.systemUptime + 0.18
@@ -495,6 +514,15 @@ final class MultitouchManager {
             }
 
             let (dx, dy) = sharedDelta(from: previousTouches, to: currentMap)
+            if prevFrameTimestamp > 0, timestamp > prevFrameTimestamp {
+                let dt = min(max(timestamp - prevFrameTimestamp, 0.004), 0.1)
+                let instVX = Double(dx) / dt
+                let instVY = Double(dy) / dt
+                smoothVelX = smoothVelX * 0.65 + instVX * 0.35
+                smoothVelY = smoothVelY * 0.65 + instVY * 0.35
+            }
+            prevFrameTimestamp = timestamp
+
             if hypot(dx, dy) > 0.0025 {
                 lastSlideUptime = now
 
@@ -508,7 +536,7 @@ final class MultitouchManager {
             }
 
             // 步进冷却期内吸收余波，避免快滑连跳多格
-            if timestamp - lastStepTimestamp < stepCooldown {
+            if timestamp - lastStepTimestamp < currentStepCooldown {
                 return
             }
 
@@ -520,18 +548,38 @@ final class MultitouchManager {
 
             var deltaCol = 0
             var deltaRow = 0
+            var nextCooldown = 0.085
 
             if ratioX >= 1.0 && ratioX >= ratioY {
-                deltaCol = stepAccumX > 0 ? 1 : -1
+                let speed = abs(smoothVelX)
+                let steps: Int
+                if AppSettings.shared.velocityBoostEnabled {
+                    if speed >= 2.15 {
+                        steps = 3
+                        nextCooldown = 0.13
+                    } else if speed >= 1.15 {
+                        steps = 2
+                        nextCooldown = 0.11
+                    } else {
+                        steps = 1
+                    }
+                } else {
+                    steps = 1
+                }
+                deltaCol = (stepAccumX > 0 ? 1 : -1) * steps
             } else if ratioY >= 1.0 {
+                let speed = abs(smoothVelY)
+                let steps = (AppSettings.shared.velocityBoostEnabled && speed >= 1.8) ? 2 : 1
+                if steps == 2 { nextCooldown = 0.11 }
                 // 触控板归一化 y 轴向上增大，网格行号向上减小
-                deltaRow = stepAccumY > 0 ? -1 : 1
+                deltaRow = (stepAccumY > 0 ? -1 : 1) * steps
             }
 
             if deltaCol != 0 || deltaRow != 0 {
                 stepAccumX = 0
                 stepAccumY = 0
                 lastStepTimestamp = timestamp
+                currentStepCooldown = nextCooldown
                 lastAutoRepeatUptime = now
                 DispatchQueue.main.async { [weak self] in
                     self?.onStep?(deltaCol, deltaRow)

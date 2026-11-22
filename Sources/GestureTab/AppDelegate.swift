@@ -163,9 +163,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 步进灵敏度子菜单
         let sensMenu = NSMenu()
         let presets: [(String, Double, Double)] = [
-            ("偏灵敏（轻滑跳格）", 0.095, 0.105),
-            ("适中稳重（推荐默认）", 0.135, 0.145),
-            ("稳重防滑（大幅度滑动）", 0.180, 0.195)
+            ("偏灵敏（轻滑跳格）", 0.075, 0.095),
+            ("适中顺滑（推荐默认 · 类 Windows 步距）", 0.095, 0.115),
+            ("稳重防滑（大幅度滑动）", 0.135, 0.150)
         ]
         for (label, hx, vy) in presets {
             let sItem = NSMenuItem(title: label, action: #selector(selectSensitivity(_:)), keyEquivalent: "")
@@ -196,10 +196,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hapticItem.state = settings.hapticEnabled ? .on : .off
         menu.addItem(hapticItem)
 
-        let repeatItem = NSMenuItem(title: "边缘/推力持续按住自动连选", action: #selector(toggleAutoRepeat), keyEquivalent: "")
+        let repeatItem = NSMenuItem(title: "物理边缘 10% 自动连选", action: #selector(toggleAutoRepeat), keyEquivalent: "")
         repeatItem.target = self
         repeatItem.state = settings.autoRepeatEnabled ? .on : .off
         menu.addItem(repeatItem)
+
+        let boostItem = NSMenuItem(title: "速度甩动加成（快滑自动跨 2~3 格）", action: #selector(toggleVelocityBoost), keyEquivalent: "")
+        boostItem.target = self
+        boostItem.state = settings.velocityBoostEnabled ? .on : .off
+        menu.addItem(boostItem)
 
         menu.addItem(.separator())
 
@@ -261,6 +266,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleAutoRepeat() {
         AppSettings.shared.autoRepeatEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleVelocityBoost() {
+        AppSettings.shared.velocityBoostEnabled.toggle()
         rebuildMenu()
     }
 
