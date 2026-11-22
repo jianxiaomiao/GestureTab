@@ -87,6 +87,7 @@ final class MultitouchManager {
     var onStep: ((_ deltaCol: Int, _ deltaRow: Int) -> Void)?
     var onCommit: (() -> Void)?
     var onCancel: (() -> Void)?
+    var onPressQ: (() -> Void)?
 
     private var frameworkHandle: UnsafeMutableRawPointer?
     private var devices: [UnsafeMutableRawPointer] = []
@@ -125,10 +126,11 @@ final class MultitouchManager {
     private var edgeEnteredUptime: TimeInterval?
     private var holdRepeatTimer: Timer?
 
-    // CGEventTap 背景滚动/拖拽拦截状态
+    // CGEventTap 背景滚动/拖拽/快捷键拦截状态
     private var isSuppressingInput = false
     private var suppressedMouseDown = false
     private var scrollBlockGraceUntil: TimeInterval = 0
+    private var isSwitcherVisibleFlag = false
 
     private var wakeObserver: NSObjectProtocol?
     private var eventTap: CFMachPort?
@@ -223,19 +225,25 @@ final class MultitouchManager {
         }
     }
 
+    func setSwitcherVisible(_ visible: Bool) {
+        lock.lock()
+        isSwitcherVisibleFlag = visible
+        lock.unlock()
+    }
+
     /// 外部按 Esc 取消当前切换
     func cancelCurrentGesture() {
         lock.lock()
-        let wasActive: Bool
+        let wasActiveOrVisible: Bool
         switch state {
         case .active:
-            wasActive = true
+            wasActiveOrVisible = true
             state = .cancelled
         case .armed:
-            wasActive = false
+            wasActiveOrVisible = isSwitcherVisibleFlag
             state = .cancelled
         default:
-            wasActive = false
+            wasActiveOrVisible = isSwitcherVisibleFlag
         }
         isSuppressingInput = false
         scrollBlockGraceUntil = ProcessInfo.processInfo.systemUptime + 0.18
@@ -245,7 +253,7 @@ final class MultitouchManager {
 
         stopHoldRepeatTimer()
 
-        if wasActive {
+        if wasActiveOrVisible {
             DispatchQueue.main.async { [weak self] in
                 self?.onCancel?()
             }
@@ -670,6 +678,7 @@ final class MultitouchManager {
             (1 << CGEventType.leftMouseDragged.rawValue) |
             (1 << CGEventType.leftMouseUp.rawValue) |
             (1 << CGEventType.scrollWheel.rawValue) |
+            (1 << CGEventType.keyDown.rawValue) |
             (1 << 29) | // NSEventTypeGesture
             (1 << 30) | // NSEventTypeMagnify
             (1 << 31)   // NSEventTypeSwipe
@@ -682,6 +691,63 @@ final class MultitouchManager {
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                 if let tap = manager.eventTap {
                     CGEvent.tapEnable(tap: tap, enable: true)
+                }
+                return Unmanaged.passUnretained(event)
+            }
+
+            if type == .keyDown {
+                manager.lock.lock()
+                let visible = manager.isSwitcherVisibleFlag
+                manager.lock.unlock()
+
+                if visible {
+                    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                    let flags = event.flags
+                    let hasModifier = flags.contains(.maskCommand)
+                        || flags.contains(.maskControl)
+                        || flags.contains(.maskAlternate)
+
+                    if !hasModifier {
+                        switch keyCode {
+                        case 53: // Esc 取消
+                            DispatchQueue.main.async {
+                                manager.cancelCurrentGesture()
+                            }
+                            return nil
+                        case 12: // Q 关闭窗口或退出程序
+                            DispatchQueue.main.async {
+                                manager.onPressQ?()
+                            }
+                            return nil
+                        case 123: // Left
+                            DispatchQueue.main.async {
+                                manager.onStep?(-1, 0)
+                            }
+                            return nil
+                        case 124: // Right
+                            DispatchQueue.main.async {
+                                manager.onStep?(1, 0)
+                            }
+                            return nil
+                        case 125: // Down
+                            DispatchQueue.main.async {
+                                manager.onStep?(0, 1)
+                            }
+                            return nil
+                        case 126: // Up
+                            DispatchQueue.main.async {
+                                manager.onStep?(0, -1)
+                            }
+                            return nil
+                        case 36: // Return 确认切换
+                            DispatchQueue.main.async {
+                                manager.onCommit?()
+                            }
+                            return nil
+                        default:
+                            break
+                        }
+                    }
                 }
                 return Unmanaged.passUnretained(event)
             }

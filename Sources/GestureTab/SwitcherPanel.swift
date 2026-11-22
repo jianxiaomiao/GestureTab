@@ -15,6 +15,8 @@ final class SwitcherController {
     private var pendingStepWorkItems: [DispatchWorkItem] = []
 
     var onUserEscCancel: (() -> Void)?
+    var onVisibilityChanged: ((Bool) -> Void)?
+    var shouldInstallFallbackKeyMonitors: (() -> Bool)?
 
     private(set) var isVisible = false
 
@@ -34,7 +36,10 @@ final class SwitcherController {
         ensurePanel()
         layoutAndShowPanel(on: screen, style: settings.displayStyle)
         isVisible = true
-        installKeyMonitors()
+        onVisibilityChanged?(true)
+        if shouldInstallFallbackKeyMonitors?() ?? true {
+            installKeyMonitors()
+        }
 
         // 异步刷新最新缩略图（优先命中缓存瞬间显示，再补充最新画面）
         let ids = Set(items.map(\.id))
@@ -106,8 +111,37 @@ final class SwitcherController {
         hide()
     }
 
+    /// 按 Q 键执行关闭选中窗口或退出选中程序
+    func performQKeyAction() {
+        guard isVisible, let target = viewModel.selectedItem else { return }
+        cancelPendingSteps()
+
+        let action = AppSettings.shared.qKeyAction
+        switch action {
+        case .closeWindow:
+            if WindowService.shared.closeWindow(target) {
+                viewModel.removeItem(id: target.id)
+                if AppSettings.shared.hapticEnabled {
+                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                }
+            }
+        case .quitApp:
+            if WindowService.shared.quitApp(target) {
+                viewModel.removeItems(pid: target.pid)
+                if AppSettings.shared.hapticEnabled {
+                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                }
+            }
+        }
+
+        if viewModel.items.isEmpty {
+            onUserEscCancel?()
+        }
+    }
+
     private func hide() {
         isVisible = false
+        onVisibilityChanged?(false)
         cancelPendingSteps()
         removeKeyMonitors()
         panel?.orderOut(nil)
@@ -203,6 +237,14 @@ final class SwitcherController {
         case 53: // Esc 取消切换
             DispatchQueue.main.async { [weak self] in
                 self?.onUserEscCancel?()
+            }
+            return true
+        case 12: // Q 关闭窗口或退出程序
+            guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
+                return false
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.performQKeyAction()
             }
             return true
         case 123: // Left Arrow

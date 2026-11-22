@@ -128,6 +128,24 @@ final class SwitcherViewModel: ObservableObject {
         selectedIndex = nextIndex
         return true
     }
+
+    func removeItem(id: CGWindowID) {
+        items.removeAll { $0.id == id }
+        if !items.isEmpty {
+            selectedIndex = min(selectedIndex, items.count - 1)
+        } else {
+            selectedIndex = 0
+        }
+    }
+
+    func removeItems(pid: pid_t) {
+        items.removeAll { $0.pid == pid }
+        if !items.isEmpty {
+            selectedIndex = min(selectedIndex, items.count - 1)
+        } else {
+            selectedIndex = 0
+        }
+    }
 }
 
 struct VisualEffectBackdrop: NSViewRepresentable {
@@ -150,6 +168,7 @@ struct VisualEffectBackdrop: NSViewRepresentable {
 
 struct SwitcherView: View {
     @ObservedObject var viewModel: SwitcherViewModel
+    @ObservedObject private var settings = AppSettings.shared
     let onSelectAndCommit: (Int) -> Void
 
     private var gridColumns: [GridItem] {
@@ -201,7 +220,7 @@ struct SwitcherView: View {
                             .truncationMode(.tail)
                     }
                     Spacer()
-                    Text("滑动选窗口 · 松手切入 · Esc 取消")
+                    Text("滑动选窗口 · 松手切入 · \(settings.qKeyAction.shortHint) · Esc 取消")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -266,7 +285,7 @@ struct SwitcherView: View {
 
                 Spacer(minLength: 4)
 
-                Text("触控板滑动选择窗口 · 松手立即进入 · Esc 取消")
+                Text("触控板滑动选择窗口 · 松手立即进入 · \(settings.qKeyAction.shortHint) · Esc 取消")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.72))
                     .padding(.bottom, 20)

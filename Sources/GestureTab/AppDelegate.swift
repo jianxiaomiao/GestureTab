@@ -38,8 +38,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         multitouch.onCancel = { [weak self] in
             self?.switcher.cancelAndHide()
         }
+        multitouch.onPressQ = { [weak self] in
+            self?.switcher.performQKeyAction()
+        }
         switcher.onUserEscCancel = { [weak self] in
             self?.multitouch.cancelCurrentGesture()
+        }
+        switcher.onVisibilityChanged = { [weak self] visible in
+            self?.multitouch.setSwitcherVisible(visible)
+        }
+        switcher.shouldInstallFallbackKeyMonitors = { [weak self] in
+            !(self?.multitouch.isEventTapActive ?? false)
         }
     }
 
@@ -191,6 +200,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         colParent.submenu = colMenu
         menu.addItem(colParent)
 
+        // 按 Q 键操作子菜单
+        let qMenu = NSMenu()
+        for qAct in QKeyAction.allCases {
+            let qItem = NSMenuItem(title: qAct.displayName, action: #selector(selectQKeyAction(_:)), keyEquivalent: "")
+            qItem.target = self
+            qItem.representedObject = qAct.rawValue
+            qItem.state = (settings.qKeyAction == qAct) ? .on : .off
+            qMenu.addItem(qItem)
+        }
+        let qParent = NSMenuItem(title: "选中窗口按 Q 键操作", action: nil, keyEquivalent: "")
+        qParent.submenu = qMenu
+        menu.addItem(qParent)
+
         let hapticItem = NSMenuItem(title: "切换时触控板震动反馈", action: #selector(toggleHaptic), keyEquivalent: "")
         hapticItem.target = self
         hapticItem.state = settings.hapticEnabled ? .on : .off
@@ -257,6 +279,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func selectColumns(_ sender: NSMenuItem) {
         AppSettings.shared.columnsCount = sender.tag
         rebuildMenu()
+    }
+
+    @objc private func selectQKeyAction(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String,
+           let action = QKeyAction(rawValue: raw) {
+            AppSettings.shared.qKeyAction = action
+            rebuildMenu()
+        }
     }
 
     @objc private func toggleHaptic() {

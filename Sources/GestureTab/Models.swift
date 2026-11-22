@@ -39,6 +39,34 @@ enum DisplayStyle: String, CaseIterable, Identifiable {
     }
 }
 
+/// 选中窗口时按 Q 键执行的操作
+enum QKeyAction: String, CaseIterable, Identifiable {
+    /// 关闭当前高亮选中的单个窗口
+    case closeWindow = "closeWindow"
+    /// 退出当前高亮窗口所属的整个程序
+    case quitApp = "quitApp"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .closeWindow:
+            return "关闭当前选中窗口"
+        case .quitApp:
+            return "退出选中窗口所属程序"
+        }
+    }
+
+    var shortHint: String {
+        switch self {
+        case .closeWindow:
+            return "Q 关闭窗口"
+        case .quitApp:
+            return "Q 退出程序"
+        }
+    }
+}
+
 /// 单个可切换窗口的数据模型
 struct WindowItem: Identifiable {
     let id: CGWindowID
@@ -67,6 +95,7 @@ final class AppSettings: ObservableObject {
         static let settingsVersion = "settingsVersion"
         static let gestureMode = "gestureMode"
         static let displayStyle = "displayStyle"
+        static let qKeyAction = "qKeyAction"
         static let horizontalStep = "horizontalStep"
         static let verticalStep = "verticalStep"
         static let columnsCount = "columnsCount"
@@ -81,6 +110,10 @@ final class AppSettings: ObservableObject {
 
     @Published var displayStyle: DisplayStyle {
         didSet { UserDefaults.standard.set(displayStyle.rawValue, forKey: Keys.displayStyle) }
+    }
+
+    @Published var qKeyAction: QKeyAction {
+        didSet { UserDefaults.standard.set(qKeyAction.rawValue, forKey: Keys.qKeyAction) }
     }
 
     /// 水平方向每步进一格所需的归一化触控板位移（默认 0.095，约半块触控板可覆盖 5~6 列）
@@ -133,6 +166,13 @@ final class AppSettings: ObservableObject {
             self.displayStyle = style
         } else {
             self.displayStyle = .compactPanel
+        }
+
+        if let rawQ = defaults.string(forKey: Keys.qKeyAction),
+           let qAction = QKeyAction(rawValue: rawQ) {
+            self.qKeyAction = qAction
+        } else {
+            self.qKeyAction = .closeWindow
         }
 
         let hStep = defaults.double(forKey: Keys.horizontalStep)

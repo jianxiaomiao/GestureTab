@@ -598,4 +598,48 @@ final class WindowService {
             }
         }
     }
+
+    /// 关闭指定单个窗口（通过 AXCloseButton 触发原生关闭，保留未保存提示保护）
+    @discardableResult
+    func closeWindow(_ item: WindowItem) -> Bool {
+        let targetAX: AXUIElement? = item.axElement ?? findAXWindow(pid: item.pid, windowID: item.id)
+        guard let ax = targetAX else { return false }
+
+        var closeBtnRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(ax, kAXCloseButtonAttribute as CFString, &closeBtnRef) == .success,
+              let closeBtn = closeBtnRef else {
+            return false
+        }
+
+        let err = AXUIElementPerformAction(closeBtn as! AXUIElement, kAXPressAction as CFString)
+        return err == .success
+    }
+
+    /// 退出目标窗口所属的整个应用程序（等效 Cmd+Q 优雅退出）
+    @discardableResult
+    func quitApp(_ item: WindowItem) -> Bool {
+        if let app = item.runningApp {
+            return app.terminate()
+        }
+        if let app = NSRunningApplication(processIdentifier: item.pid) {
+            return app.terminate()
+        }
+        return false
+    }
+
+    private func findAXWindow(pid: pid_t, windowID: CGWindowID) -> AXUIElement? {
+        let appAX = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let wins = windowsRef as? [AXUIElement] else {
+            return nil
+        }
+        for w in wins {
+            var wid: CGWindowID = 0
+            if _AXUIElementGetWindow(w, &wid) == .success, wid == windowID {
+                return w
+            }
+        }
+        return nil
+    }
 }
