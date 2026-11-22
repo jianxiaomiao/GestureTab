@@ -145,15 +145,24 @@ final class WindowSnapManager {
                 return
             }
 
-            // 窗口位置整体移动 >= 4pt，确认为拖动窗口
-            if hypot(curFrame.origin.x - startFrame.origin.x, curFrame.origin.y - startFrame.origin.y) >= 4 {
+            // 窗口位置整体移动 >= 3pt，确认为拖动窗口
+            if hypot(curFrame.origin.x - startFrame.origin.x, curFrame.origin.y - startFrame.origin.y) >= 3 {
                 SnapAssistController.shared.dismiss()
                 dragState = .dragging(axWin: axWin, wid: wid, startFrame: startFrame, restoredOnce: false)
                 evaluateHotZones(at: axLocation)
                 return
             }
 
-            // 鼠标在窗口内移动超过 28pt 但窗口没动，说明用户在框选文字或拖动网页内容
+            // 鼠标移动超过 28pt 但窗口没动：若在窗口内容区（非标题栏顶边夹紧情况），说明在框选文字/拖内容
+            let clickedInTitlebar = (downMouseAX.y - startFrame.origin.y) <= 60
+            let pushedAtTopClamp = axLocation.y <= startFrame.origin.y + 8
+            if clickedInTitlebar && pushedAtTopClamp {
+                SnapAssistController.shared.dismiss()
+                dragState = .dragging(axWin: axWin, wid: wid, startFrame: startFrame, restoredOnce: false)
+                evaluateHotZones(at: axLocation)
+                return
+            }
+
             if hypot(axLocation.x - downMouseAX.x, axLocation.y - downMouseAX.y) >= 28 {
                 dragState = .ignored
             }
@@ -263,8 +272,9 @@ final class WindowSnapManager {
         // 2) 四角 1/4 分屏热区（L 形角落判定，优先于单边）
         let cornerW = min(130, visibleAX.width * 0.10)
         let cornerH = min(110, visibleAX.height * 0.12)
-        let edgeStrip: CGFloat = 18
-        let topStrip: CGFloat = 24
+        let edgeStrip: CGFloat = 20
+        // 顶部统一工具栏通常高约 40-52pt，放宽顶部触发带到 visibleAX.minY + 42pt，菜单栏附近必触发
+        let topStrip: CGFloat = 42
 
         let nearLeftEdge = axLocation.x <= screenAX.minX + edgeStrip
         let nearRightEdge = axLocation.x >= screenAX.maxX - edgeStrip
@@ -354,6 +364,13 @@ final class WindowSnapManager {
     // MARK: - Window Hit Testing
 
     private func windowUnderCursor(at axLocation: CGPoint) -> (axWin: AXUIElement, wid: CGWindowID?, frame: CGRect)? {
+        if let hit = axWindowViaHitTest(at: axLocation) {
+            return hit
+        }
+        return axWindowViaCGWindowList(at: axLocation)
+    }
+
+    private func axWindowViaHitTest(at axLocation: CGPoint) -> (axWin: AXUIElement, wid: CGWindowID?, frame: CGRect)? {
         let systemWide = AXUIElementCreateSystemWide()
         var elementRef: AXUIElement?
         guard AXUIElementCopyElementAtPosition(
@@ -367,7 +384,7 @@ final class WindowSnapManager {
 
         var current: AXUIElement? = startEl
         var resolvedWin: AXUIElement?
-        for _ in 0..<10 {
+        for _ in 0..<24 {
             guard let el = current else { break }
             var roleRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef) == .success,
@@ -385,7 +402,33 @@ final class WindowSnapManager {
         }
 
         guard let axWin = resolvedWin else { return nil }
+        return validateDraggableWindow(axWin)
+    }
 
+    private func axWindowViaCGWindowList(at axLocation: CGPoint) -> (axWin: AXUIElement, wid: CGWindowID?, frame: CGRect)? {
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let list = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+        for dict in list {
+            guard let layer = dict[kCGWindowLayer as String] as? Int, layer == 0,
+                  let pid = dict[kCGWindowOwnerPID as String] as? pid_t, pid != selfPID,
+                  let wid = dict[kCGWindowNumber as String] as? CGWindowID,
+                  let boundsDict = dict[kCGWindowBounds as String] as? NSDictionary else {
+                continue
+            }
+            var bounds = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(boundsDict, &bounds),
+                  bounds.width >= 100, bounds.height >= 80,
+                  bounds.contains(axLocation) else {
+                continue
+            }
+            if let axWin = WindowService.shared.findAXWindow(pid: pid, windowID: wid) {
+                return validateDraggableWindow(axWin)
+            }
+        }
+        return nil
+    }
+
+    private func validateDraggableWindow(_ axWin: AXUIElement) -> (axWin: AXUIElement, wid: CGWindowID?, frame: CGRect)? {
         var pid: pid_t = 0
         AXUIElementGetPid(axWin, &pid)
         guard pid != 0, pid != ProcessInfo.processInfo.processIdentifier else { return nil }

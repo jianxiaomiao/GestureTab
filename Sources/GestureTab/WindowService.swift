@@ -104,8 +104,11 @@ final class WindowService {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            // 切换到任意其他桌面/全屏后立即预热窗口句柄并抓取该桌面全部窗口缓存
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            // 快速与延迟两次预热窗口句柄（防止快速来回切桌面时漏抓），并抓取缩略图
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                self?.warmAXElementCache()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
                 self?.warmAXElementCache()
                 self?.captureVisibleThumbnailsInBackground()
             }
@@ -707,17 +710,15 @@ final class WindowService {
         }
 
         let nextMin = !currentMin
-        let err = AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, nextMin as CFBoolean)
-        guard err == .success else { return nil }
-
-        // 部分跨桌面窗口设置恢复时可能被系统忽略，回读校验确认是否真正变更
-        var verifyRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(ax, kAXMinimizedAttribute as CFString, &verifyRef) == .success,
-           let actual = verifyRef as? Bool,
-           actual != nextMin {
-            return nil
+        var err = AXUIElementSetAttributeValue(ax, kAXMinimizedAttribute as CFString, nextMin as CFBoolean)
+        if err != .success, item.axElement != nil {
+            // 若旧缓存句柄失效，清缓存后尝试重新查找一次
+            removeCachedAXElement(for: item.id)
+            if let freshAX = findAXWindow(pid: item.pid, windowID: item.id) {
+                err = AXUIElementSetAttributeValue(freshAX, kAXMinimizedAttribute as CFString, nextMin as CFBoolean)
+            }
         }
-        return nextMin
+        return err == .success ? nextMin : nil
     }
 
     private func getCachedAXElement(for windowID: CGWindowID) -> AXUIElement? {

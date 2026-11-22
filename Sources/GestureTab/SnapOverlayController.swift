@@ -319,7 +319,10 @@ final class SnapAssistController {
 
     private func reloadCandidates() {
         let all = WindowService.shared.fetchAllSwitchableWindows()
-        viewModel.candidates = all.filter { !$0.isWindowlessApp && !placedWindowIDs.contains($0.id) }
+        // 仅展示当前桌面窗口与 Dock 最小化窗口（避免点击全屏或其他桌面窗口导致突然跳离当前分屏桌面）
+        viewModel.candidates = all.filter {
+            !$0.isWindowlessApp && !$0.isFullScreen && ($0.isOnScreen || $0.isMinimized) && !placedWindowIDs.contains($0.id)
+        }
     }
 
     private func presentNextEmptyZone() {
