@@ -203,3 +203,67 @@ final class AppSettings: ObservableObject {
         }
     }
 }
+
+/// 通过标准 macOS LaunchAgent 管理开机自启动（兼容本地自签名及任意放置路径）
+enum LaunchAtLoginManager {
+    private static let label = "com.gesturetab.app"
+
+    private static var launchAgentsDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+    }
+
+    private static var plistURL: URL {
+        launchAgentsDir.appendingPathComponent("\(label).plist")
+    }
+
+    static var isEnabled: Bool {
+        FileManager.default.fileExists(atPath: plistURL.path)
+    }
+
+    @discardableResult
+    static func setEnabled(_ enabled: Bool) -> Bool {
+        if enabled {
+            return writePlist()
+        } else {
+            do {
+                if FileManager.default.fileExists(atPath: plistURL.path) {
+                    try FileManager.default.removeItem(at: plistURL)
+                }
+                return true
+            } catch {
+                return false
+            }
+        }
+    }
+
+    /// 若用户移动了 GestureTab.app 所在目录，启动时自动同步最新可执行路径
+    static func syncPathIfNeeded() {
+        guard isEnabled, let exePath = Bundle.main.executablePath else { return }
+        if let dict = NSDictionary(contentsOf: plistURL) as? [String: Any],
+           let args = dict["ProgramArguments"] as? [String],
+           args.first == exePath {
+            return
+        }
+        _ = writePlist()
+    }
+
+    private static func writePlist() -> Bool {
+        guard let exePath = Bundle.main.executablePath else { return false }
+        do {
+            try FileManager.default.createDirectory(at: launchAgentsDir, withIntermediateDirectories: true)
+            let plist: [String: Any] = [
+                "Label": label,
+                "ProgramArguments": [exePath],
+                "RunAtLoad": true,
+                "KeepAlive": false,
+                "ProcessType": "Interactive"
+            ]
+            let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            try data.write(to: plistURL, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+}

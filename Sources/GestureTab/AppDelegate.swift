@@ -8,7 +8,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionPollTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 单实例保护，避免开机自启与手动打开重复出现两个菜单栏图标
+        if let bundleID = Bundle.main.bundleIdentifier {
+            let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            if !others.isEmpty {
+                NSApp.terminate(nil)
+                return
+            }
+        }
+
         NSApp.setActivationPolicy(.accessory)
+        LaunchAtLoginManager.syncPathIfNeeded()
 
         setupMenuBar()
         setupConnections()
@@ -228,6 +239,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         boostItem.state = settings.velocityBoostEnabled ? .on : .off
         menu.addItem(boostItem)
 
+        let loginItem = NSMenuItem(title: "开机自动启动", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.state = LaunchAtLoginManager.isEnabled ? .on : .off
+        menu.addItem(loginItem)
+
         menu.addItem(.separator())
 
         let trackpadTipItem = NSMenuItem(title: "打开系统「触控板」设置（关闭原生四指防冲突）", action: #selector(openTrackpadSettings), keyEquivalent: "")
@@ -301,6 +317,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleVelocityBoost() {
         AppSettings.shared.velocityBoostEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        _ = LaunchAtLoginManager.setEnabled(!LaunchAtLoginManager.isEnabled)
         rebuildMenu()
     }
 
