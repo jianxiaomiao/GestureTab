@@ -119,6 +119,7 @@ final class AppSettings: ObservableObject {
         static let snapEnabled = "snapEnabled"
         static let topSnapZoneMode = "topSnapZoneMode"
         static let snapAssistEnabled = "snapAssistEnabled"
+        static let dockPreviewEnabled = "dockPreviewEnabled"
     }
 
     @Published var gestureMode: GestureMode {
@@ -202,6 +203,11 @@ final class AppSettings: ObservableObject {
     /// 分屏后空闲区域弹出窗口缩略图选择器（Snap Assist）
     @Published var snapAssistEnabled: Bool {
         didSet { UserDefaults.standard.set(snapAssistEnabled, forKey: Keys.snapAssistEnabled) }
+    }
+
+    /// 启用程序坞（Dock）悬停缩略图预览（类 Windows 任务栏预览）
+    @Published var dockPreviewEnabled: Bool {
+        didSet { UserDefaults.standard.set(dockPreviewEnabled, forKey: Keys.dockPreviewEnabled) }
     }
 
     func isAppIgnored(key: String) -> Bool {
@@ -327,6 +333,12 @@ final class AppSettings: ObservableObject {
             self.snapAssistEnabled = defaults.bool(forKey: Keys.snapAssistEnabled)
         } else {
             self.snapAssistEnabled = true
+        }
+
+        if defaults.object(forKey: Keys.dockPreviewEnabled) != nil {
+            self.dockPreviewEnabled = defaults.bool(forKey: Keys.dockPreviewEnabled)
+        } else {
+            self.dockPreviewEnabled = true
         }
     }
 }

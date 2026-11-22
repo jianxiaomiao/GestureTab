@@ -93,8 +93,7 @@ final class SnapLayoutBarController {
         panel?.frame ?? .zero
     }
 
-    func show(on screen: NSScreen) {
-        currentScreen = screen
+    func expectedBarCocoaRect(on screen: NSScreen) -> CGRect {
         let totalW = hPadding * 2
             + CGFloat(templates.count) * thumbWidth
             + CGFloat(templates.count - 1) * itemSpacing
@@ -103,7 +102,26 @@ final class SnapLayoutBarController {
         let vf = screen.visibleFrame
         let originX = round(vf.midX - totalW / 2)
         let originY = round(vf.maxY - totalH - 10)
-        let frame = CGRect(x: originX, y: originY, width: totalW, height: totalH)
+        return CGRect(x: originX, y: originY, width: totalW, height: totalH)
+    }
+
+    /// 布局栏本身及其周围一圈（含上方菜单栏区域）的 AX 坐标触发区
+    func expectedBarTriggerAXRect(on screen: NSScreen, margin: CGFloat = 24) -> CGRect {
+        let barAX = WindowService.cocoaRectToAXRect(expectedBarCocoaRect(on: screen))
+        let screenAX = WindowService.cocoaRectToAXRect(screen.frame)
+        let topY = screenAX.minY
+        let bottomY = barAX.maxY + margin
+        return CGRect(
+            x: barAX.minX - margin,
+            y: topY,
+            width: barAX.width + margin * 2,
+            height: max(0, bottomY - topY)
+        )
+    }
+
+    func show(on screen: NSScreen) {
+        currentScreen = screen
+        let frame = expectedBarCocoaRect(on: screen)
 
         if panel == nil {
             let p = NSPanel(

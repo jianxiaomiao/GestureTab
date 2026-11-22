@@ -428,6 +428,160 @@ final class WindowService {
         }
     }
 
+    /// 仅枚举指定单个正在运行 App 的所有真实窗口（用于 Dock 悬停极速预览）
+    func fetchWindows(for app: NSRunningApplication) -> [WindowItem] {
+        let pid = app.processIdentifier
+        guard !app.isTerminated else { return [] }
+
+        let cgList = (CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+        struct CGInfo {
+            let title: String
+            let layer: Int
+            let bounds: CGRect
+            let isOnScreen: Bool
+            let zIndex: Int
+        }
+
+        var cgByID: [CGWindowID: CGInfo] = [:]
+        for (idx, dict) in cgList.enumerated() {
+            guard let ownerPID = dict[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == pid,
+                  let wid = dict[kCGWindowNumber as String] as? CGWindowID else {
+                continue
+            }
+            let layer = (dict[kCGWindowLayer as String] as? Int) ?? -1
+            let title = (dict[kCGWindowName as String] as? String) ?? ""
+            let isOnScreen = (dict[kCGWindowIsOnscreen as String] as? Bool) ?? false
+            var bounds = CGRect.zero
+            if let boundsDict = dict[kCGWindowBounds as String] as? NSDictionary {
+                CGRectMakeWithDictionaryRepresentation(boundsDict, &bounds)
+            }
+            cgByID[wid] = CGInfo(title: title, layer: layer, bounds: bounds, isOnScreen: isOnScreen, zIndex: idx)
+        }
+
+        var itemsByID: [CGWindowID: WindowItem] = [:]
+        var zOrderByID: [CGWindowID: Int] = [:]
+        let appName = app.localizedName ?? "App"
+        let appIcon = app.icon
+
+        // 1) 通过 AXUIElement 枚举该 App 窗口
+        let appAX = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appAX, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let axWindows = windowsRef as? [AXUIElement] {
+            for axWin in axWindows {
+                var subroleRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(axWin, kAXSubroleAttribute as CFString, &subroleRef)
+                if let subrole = subroleRef as? String, subrole != "AXStandardWindow" && subrole != "AXDialog" {
+                    continue
+                }
+                var wid: CGWindowID = 0
+                guard _AXUIElementGetWindow(axWin, &wid) == .success, wid != 0 else { continue }
+
+                var titleRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(axWin, kAXTitleAttribute as CFString, &titleRef)
+                let axTitle = (titleRef as? String) ?? ""
+
+                var minRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(axWin, kAXMinimizedAttribute as CFString, &minRef)
+                let isMinimized = (minRef as? Bool) ?? false
+
+                var fsRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(axWin, "AXFullScreen" as CFString, &fsRef)
+                var isFullScreen = (fsRef as? Bool) ?? false
+
+                let cgInfo = cgByID[wid]
+                if let bounds = cgInfo?.bounds, (bounds.width < 80 || bounds.height < 60), !isMinimized {
+                    continue
+                }
+                if !isFullScreen, let bounds = cgInfo?.bounds, let mainScreen = NSScreen.main {
+                    if abs(bounds.width - mainScreen.frame.width) <= 2 &&
+                       abs(bounds.height - mainScreen.frame.height) <= 2 &&
+                       app.bundleIdentifier != "com.apple.finder" {
+                        isFullScreen = true
+                    }
+                }
+
+                setCachedAXElement(axWin, for: wid)
+                itemsByID[wid] = WindowItem(
+                    id: wid,
+                    pid: pid,
+                    appName: appName,
+                    title: !axTitle.isEmpty ? axTitle : (cgInfo?.title ?? ""),
+                    appIcon: appIcon,
+                    axElement: axWin,
+                    runningApp: app,
+                    isMinimized: isMinimized,
+                    isFullScreen: isFullScreen,
+                    isOnScreen: cgInfo?.isOnScreen ?? false,
+                    isWindowlessApp: false,
+                    thumbnail: getCachedThumbnail(for: wid)
+                )
+                zOrderByID[wid] = cgInfo?.zIndex ?? Int.max
+            }
+        }
+
+        // 2) 补充 CGWindowList 中属于该 App 的跨桌面窗口
+        for (wid, cgInfo) in cgByID {
+            guard itemsByID[wid] == nil,
+                  cgInfo.layer == 0,
+                  cgInfo.bounds.width >= 100,
+                  cgInfo.bounds.height >= 80 else { continue }
+            if app.bundleIdentifier == "com.apple.finder" && cgInfo.title.isEmpty { continue }
+            if cgInfo.title.isEmpty && !cgInfo.isOnScreen { continue }
+
+            let isFS: Bool = {
+                guard let screen = NSScreen.main else { return false }
+                return abs(cgInfo.bounds.width - screen.frame.width) <= 2 &&
+                       abs(cgInfo.bounds.height - screen.frame.height) <= 2
+            }()
+
+            let cachedAX = getCachedAXElement(for: wid)
+            var isMin = false
+            if let cachedAX {
+                var minRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(cachedAX, kAXMinimizedAttribute as CFString, &minRef) == .success {
+                    isMin = (minRef as? Bool) ?? false
+                }
+            }
+
+            itemsByID[wid] = WindowItem(
+                id: wid,
+                pid: pid,
+                appName: appName,
+                title: cgInfo.title,
+                appIcon: appIcon,
+                axElement: cachedAX,
+                runningApp: app,
+                isMinimized: isMin,
+                isFullScreen: isFS,
+                isOnScreen: cgInfo.isOnScreen,
+                isWindowlessApp: false,
+                thumbnail: getCachedThumbnail(for: wid)
+            )
+            zOrderByID[wid] = cgInfo.zIndex
+        }
+
+        mruLock.lock()
+        let mruSnapshot = mruOrder
+        mruLock.unlock()
+        let mruRank = Dictionary(uniqueKeysWithValues: mruSnapshot.enumerated().map { ($0.element, $0.offset) })
+
+        return itemsByID.values.sorted { a, b in
+            let ra = mruRank[a.id]
+            let rb = mruRank[b.id]
+            switch (ra, rb) {
+            case let (x?, y?): return x < y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil):
+                let za = zOrderByID[a.id] ?? Int.max
+                let zb = zOrderByID[b.id] ?? Int.max
+                return za < zb
+            }
+        }
+    }
+
     // MARK: - Thumbnail Caching & Refresh (SkyLight + ScreenCaptureKit + Disk Cache)
 
     private func getCachedThumbnail(for windowID: CGWindowID) -> NSImage? {

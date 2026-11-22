@@ -24,6 +24,11 @@ final class WindowSnapManager {
     /// 记录已被分屏/最大化的窗口原始尺寸，拖离边缘时自动还原
     private var snappedOriginalFrames: [CGWindowID: CGRect] = [:]
 
+    var isDraggingWindow: Bool {
+        if case .dragging = dragState { return true }
+        return false
+    }
+
     private init() {
         SnapAssistController.shared.onWindowSnapped = { [weak self] wid, originalFrame, _ in
             if self?.snappedOriginalFrames[wid] == nil {
@@ -247,33 +252,28 @@ final class WindowSnapManager {
 
         let screenAX = WindowService.cocoaRectToAXRect(screen.frame)
         let visibleAX = WindowService.cocoaRectToAXRect(screen.visibleFrame)
+        let barTriggerAX = layoutBar.expectedBarTriggerAXRect(on: screen, margin: 24)
 
-        // 1) 若顶部悬浮分屏布局栏已展开，优先命中其中的具体布局格
-        if layoutBar.isVisible {
+        // 1) 若鼠标位于顶部悬浮分屏布局栏显示区域及周围一圈，直接显示并命中具体布局格
+        if barTriggerAX.contains(axLocation) {
+            if !layoutBar.isVisible {
+                layoutBar.show(on: screen)
+            }
             if let barTarget = layoutBar.hitTest(cocoaMouse: cocoaMouse) {
                 selectTarget(barTarget)
-                return
-            }
-
-            let barTopTolerance = visibleAX.minY + 130
-            let barPF = layoutBar.panelFrame
-            if axLocation.y <= barTopTolerance &&
-               axLocation.x >= barPF.minX - 60 &&
-               axLocation.x <= barPF.maxX + 60 {
-                // 鼠标在菜单栏与布局栏之间过渡地带，保持布局栏展开
+            } else {
                 currentTarget = nil
                 previewOverlay.hide()
-                return
-            } else {
-                layoutBar.hide()
             }
+            return
+        } else if layoutBar.isVisible {
+            layoutBar.hide()
         }
 
         // 2) 四角 1/4 分屏热区（L 形角落判定，优先于单边）
         let cornerW = min(130, visibleAX.width * 0.10)
         let cornerH = min(110, visibleAX.height * 0.12)
         let edgeStrip: CGFloat = 20
-        // 顶部统一工具栏通常高约 40-52pt，放宽顶部触发带到 visibleAX.minY + 42pt，菜单栏附近必触发
         let topStrip: CGFloat = 42
 
         let nearLeftEdge = axLocation.x <= screenAX.minX + edgeStrip
@@ -303,24 +303,11 @@ final class WindowSnapManager {
             return
         }
 
-        // 3) 顶部热区：鼠标位置一到达顶部立即触发（零延迟不碰运气）
+        // 3) 顶部两侧热区（布局栏周围区域之外的顶边）
         if nearTopEdge {
-            let relX = (axLocation.x - visibleAX.minX) / max(visibleAX.width, 1)
-
             switch AppSettings.shared.topSnapZoneMode {
             case .centerLayoutSidesMaximize:
-                if relX >= 0.24 && relX <= 0.76 {
-                    layoutBar.show(on: screen)
-                    if let barTarget = layoutBar.hitTest(cocoaMouse: cocoaMouse) {
-                        selectTarget(barTarget)
-                    } else {
-                        currentTarget = nil
-                        previewOverlay.hide()
-                    }
-                } else {
-                    selectTarget(SnapTarget(screen: screen, layout: .maximize, zoneIndex: 0))
-                }
-
+                selectTarget(SnapTarget(screen: screen, layout: .maximize, zoneIndex: 0))
             case .fullTopLayout:
                 layoutBar.show(on: screen)
                 if let barTarget = layoutBar.hitTest(cocoaMouse: cocoaMouse) {

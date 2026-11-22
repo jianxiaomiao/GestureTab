@@ -27,12 +27,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WindowService.shared.startMonitoring()
         multitouch.start()
         WindowSnapManager.shared.start()
+        DockPreviewManager.shared.shouldSuppressPreview = { [weak self] in
+            (self?.switcher.isVisible ?? false) || WindowSnapManager.shared.isDraggingWindow
+        }
+        DockPreviewManager.shared.start()
 
         checkPermissionsOnLaunch()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         permissionPollTimer?.invalidate()
+        DockPreviewManager.shared.stop()
         WindowSnapManager.shared.stop()
         multitouch.stop()
         WindowService.shared.stopMonitoring()
@@ -71,6 +76,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         switcher.onVisibilityChanged = { [weak self] visible in
             self?.multitouch.setSwitcherVisible(visible)
+            if visible {
+                DockPreviewManager.shared.hideImmediately()
+            }
         }
         switcher.shouldInstallFallbackKeyMonitors = { [weak self] in
             !(self?.multitouch.isEventTapActive ?? false)
@@ -100,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if axNow {
                     self.multitouch.restart()
                     WindowSnapManager.shared.start()
+                    DockPreviewManager.shared.start()
                 }
                 if axNow && srNow {
                     timer.invalidate()
@@ -363,6 +372,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         snapParent.submenu = snapMenu
         menu.addItem(snapParent)
 
+        let dockPreviewItem = NSMenuItem(title: "启用程序坞（Dock）悬停缩略图预览", action: #selector(toggleDockPreview), keyEquivalent: "")
+        dockPreviewItem.target = self
+        dockPreviewItem.state = settings.dockPreviewEnabled ? .on : .off
+        menu.addItem(dockPreviewItem)
+
         menu.addItem(.separator())
 
         let trackpadTipItem = NSMenuItem(title: "打开系统「触控板」设置（关闭原生四指防冲突）", action: #selector(openTrackpadSettings), keyEquivalent: "")
@@ -481,6 +495,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleSnapAssist() {
         AppSettings.shared.snapAssistEnabled.toggle()
+        rebuildMenu()
+    }
+
+    @objc private func toggleDockPreview() {
+        AppSettings.shared.dockPreviewEnabled.toggle()
+        if AppSettings.shared.dockPreviewEnabled {
+            DockPreviewManager.shared.start()
+        } else {
+            DockPreviewManager.shared.stop()
+        }
         rebuildMenu()
     }
 
