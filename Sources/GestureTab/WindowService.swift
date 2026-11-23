@@ -15,6 +15,85 @@ private typealias CGSHWCaptureWindowListFn = @convention(c) (
     Int32,
     UInt32
 ) -> Unmanaged<CFArray>?
+private typealias CGSCopySpacesForWindowsFn = @convention(c) (
+    CGSConnectionID,
+    UInt32,
+    CFArray
+) -> Unmanaged<CFArray>?
+private typealias CGSCopyManagedDisplaySpacesFn = @convention(c) (
+    CGSConnectionID
+) -> Unmanaged<CFArray>?
+private typealias CGSGetActiveSpaceFn = @convention(c) (
+    CGSConnectionID
+) -> UInt64
+
+/// SkyLight 私有 Space 查询接口（精准区分“其他桌面窗口”与“同窗口非活动原生标签页/离屏幽灵窗口”）
+private enum SkyLightSpaces {
+    private static let handle: UnsafeMutableRawPointer? = {
+        dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+            ?? dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
+    }()
+
+    private static let fnMainConnection: CGSMainConnectionIDFn? = {
+        guard let handle, let sym = dlsym(handle, "CGSMainConnectionID") else { return nil }
+        return unsafeBitCast(sym, to: CGSMainConnectionIDFn.self)
+    }()
+
+    private static let fnCopySpacesForWindows: CGSCopySpacesForWindowsFn? = {
+        guard let handle, let sym = dlsym(handle, "CGSCopySpacesForWindows") else { return nil }
+        return unsafeBitCast(sym, to: CGSCopySpacesForWindowsFn.self)
+    }()
+
+    private static let fnCopyManagedDisplaySpaces: CGSCopyManagedDisplaySpacesFn? = {
+        guard let handle, let sym = dlsym(handle, "CGSCopyManagedDisplaySpaces") else { return nil }
+        return unsafeBitCast(sym, to: CGSCopyManagedDisplaySpacesFn.self)
+    }()
+
+    private static let fnGetActiveSpace: CGSGetActiveSpaceFn? = {
+        guard let handle, let sym = dlsym(handle, "CGSGetActiveSpace") else { return nil }
+        return unsafeBitCast(sym, to: CGSGetActiveSpaceFn.self)
+    }()
+
+    static var isAvailable: Bool {
+        fnMainConnection != nil && fnCopySpacesForWindows != nil
+    }
+
+    /// 返回当前所有显示器正处于活动状态的 Space ID 集合
+    static func currentSpaceIDs() -> Set<UInt64> {
+        guard let fnMainConnection else { return [] }
+        let cid = fnMainConnection()
+        var result = Set<UInt64>()
+
+        if let fnCopyManagedDisplaySpaces,
+           let displays = fnCopyManagedDisplaySpaces(cid)?.takeRetainedValue() as? [[String: Any]] {
+            for display in displays {
+                if let current = display["Current Space"] as? [String: Any],
+                   let idNum = current["id64"] as? NSNumber {
+                    result.insert(idNum.uint64Value)
+                }
+            }
+        }
+        if result.isEmpty, let fnGetActiveSpace {
+            let active = fnGetActiveSpace(cid)
+            if active != 0 {
+                result.insert(active)
+            }
+        }
+        return result
+    }
+
+    /// 返回指定窗口所属的所有 Space ID；原生窗口非活动标签页（如访达后台 Tab）及隐藏辅助窗会返回空集合
+    static func spaces(for windowID: CGWindowID) -> Set<UInt64> {
+        guard let fnMainConnection, let fnCopySpacesForWindows else { return [] }
+        let cid = fnMainConnection()
+        let arr = [NSNumber(value: windowID)] as CFArray
+        // 0x7 = kCGSAllSpacesMask (current + other + fullscreen)
+        guard let raw = fnCopySpacesForWindows(cid, 0x7, arr)?.takeRetainedValue() as? [NSNumber] else {
+            return []
+        }
+        return Set(raw.map(\.uint64Value))
+    }
+}
 
 /// SkyLight 私有高速抓图接口（可尝试直接抓取后台/其他 Space 已渲染窗口）
 private enum SkyLightCapture {
@@ -250,6 +329,7 @@ final class WindowService {
 
         var itemsByID: [CGWindowID: WindowItem] = [:]
         var zOrderByID: [CGWindowID: Int] = [:]
+        let currentSpaces = SkyLightSpaces.currentSpaceIDs()
 
         // 1) 通过 AXUIElement 遍历每个常规 App 的全部窗口（包含最小化、全屏、跨桌面）
         for app in regularApps {
@@ -295,6 +375,13 @@ final class WindowService {
                     continue
                 }
 
+                // 过滤未归属任何桌面的非活动原生标签页 / 离屏幽灵窗（如访达后台 Tab）
+                let winSpaces = SkyLightSpaces.isAvailable ? SkyLightSpaces.spaces(for: wid) : []
+                let cgOnScreen = cgInfo?.isOnScreen ?? false
+                if !isMinimized && !cgOnScreen && !app.isHidden && SkyLightSpaces.isAvailable && winSpaces.isEmpty {
+                    continue
+                }
+
                 // 若尺寸几乎等于屏幕大小且无边框特征，补充识别全屏
                 if !isFullScreen, let bounds = cgInfo?.bounds, let mainScreen = NSScreen.main {
                     if abs(bounds.width - mainScreen.frame.width) <= 2 &&
@@ -302,6 +389,13 @@ final class WindowService {
                        app.bundleIdentifier != "com.apple.finder" {
                         isFullScreen = true
                     }
+                }
+
+                let resolvedOnCurrentSpace: Bool
+                if !winSpaces.isEmpty && !currentSpaces.isEmpty {
+                    resolvedOnCurrentSpace = !winSpaces.isDisjoint(with: currentSpaces)
+                } else {
+                    resolvedOnCurrentSpace = cgOnScreen || app.isHidden
                 }
 
                 let resolvedTitle = !axTitle.isEmpty ? axTitle : (cgInfo?.title ?? "")
@@ -318,7 +412,7 @@ final class WindowService {
                     runningApp: app,
                     isMinimized: isMinimized,
                     isFullScreen: isFullScreen,
-                    isOnScreen: cgInfo?.isOnScreen ?? false,
+                    isOnScreen: resolvedOnCurrentSpace,
                     isWindowlessApp: false,
                     thumbnail: cachedThumb
                 )
@@ -346,6 +440,12 @@ final class WindowService {
                 continue
             }
 
+            // 关键过滤：未归属任何 Space 的离屏窗口是 macOS 原生窗口后台标签页（如访达多 Tab）或离屏幽灵窗，不是“其他桌面”窗口
+            let winSpaces = SkyLightSpaces.isAvailable ? SkyLightSpaces.spaces(for: wid) : []
+            if !cgInfo.isOnScreen && SkyLightSpaces.isAvailable && winSpaces.isEmpty {
+                continue
+            }
+
             let isFS: Bool = {
                 guard let screen = NSScreen.main else { return false }
                 return abs(cgInfo.bounds.width - screen.frame.width) <= 2 &&
@@ -361,6 +461,13 @@ final class WindowService {
                 }
             }
 
+            let resolvedOnCurrentSpace: Bool
+            if !winSpaces.isEmpty && !currentSpaces.isEmpty {
+                resolvedOnCurrentSpace = !winSpaces.isDisjoint(with: currentSpaces)
+            } else {
+                resolvedOnCurrentSpace = cgInfo.isOnScreen
+            }
+
             itemsByID[wid] = WindowItem(
                 id: wid,
                 pid: cgInfo.pid,
@@ -371,7 +478,7 @@ final class WindowService {
                 runningApp: app,
                 isMinimized: isMin,
                 isFullScreen: isFS,
-                isOnScreen: cgInfo.isOnScreen,
+                isOnScreen: resolvedOnCurrentSpace,
                 isWindowlessApp: false,
                 thumbnail: getCachedThumbnail(for: wid)
             )
@@ -461,6 +568,7 @@ final class WindowService {
 
         var itemsByID: [CGWindowID: WindowItem] = [:]
         var zOrderByID: [CGWindowID: Int] = [:]
+        let currentSpaces = SkyLightSpaces.currentSpaceIDs()
         let appName = app.localizedName ?? "App"
         let appIcon = app.icon
 
@@ -494,12 +602,26 @@ final class WindowService {
                 if let bounds = cgInfo?.bounds, (bounds.width < 80 || bounds.height < 60), !isMinimized {
                     continue
                 }
+
+                let winSpaces = SkyLightSpaces.isAvailable ? SkyLightSpaces.spaces(for: wid) : []
+                let cgOnScreen = cgInfo?.isOnScreen ?? false
+                if !isMinimized && !cgOnScreen && !app.isHidden && SkyLightSpaces.isAvailable && winSpaces.isEmpty {
+                    continue
+                }
+
                 if !isFullScreen, let bounds = cgInfo?.bounds, let mainScreen = NSScreen.main {
                     if abs(bounds.width - mainScreen.frame.width) <= 2 &&
                        abs(bounds.height - mainScreen.frame.height) <= 2 &&
                        app.bundleIdentifier != "com.apple.finder" {
                         isFullScreen = true
                     }
+                }
+
+                let resolvedOnCurrentSpace: Bool
+                if !winSpaces.isEmpty && !currentSpaces.isEmpty {
+                    resolvedOnCurrentSpace = !winSpaces.isDisjoint(with: currentSpaces)
+                } else {
+                    resolvedOnCurrentSpace = cgOnScreen || app.isHidden
                 }
 
                 setCachedAXElement(axWin, for: wid)
@@ -513,7 +635,7 @@ final class WindowService {
                     runningApp: app,
                     isMinimized: isMinimized,
                     isFullScreen: isFullScreen,
-                    isOnScreen: cgInfo?.isOnScreen ?? false,
+                    isOnScreen: resolvedOnCurrentSpace,
                     isWindowlessApp: false,
                     thumbnail: getCachedThumbnail(for: wid)
                 )
@@ -530,6 +652,11 @@ final class WindowService {
             if app.bundleIdentifier == "com.apple.finder" && cgInfo.title.isEmpty { continue }
             if cgInfo.title.isEmpty && !cgInfo.isOnScreen { continue }
 
+            let winSpaces = SkyLightSpaces.isAvailable ? SkyLightSpaces.spaces(for: wid) : []
+            if !cgInfo.isOnScreen && SkyLightSpaces.isAvailable && winSpaces.isEmpty {
+                continue
+            }
+
             let isFS: Bool = {
                 guard let screen = NSScreen.main else { return false }
                 return abs(cgInfo.bounds.width - screen.frame.width) <= 2 &&
@@ -545,6 +672,13 @@ final class WindowService {
                 }
             }
 
+            let resolvedOnCurrentSpace: Bool
+            if !winSpaces.isEmpty && !currentSpaces.isEmpty {
+                resolvedOnCurrentSpace = !winSpaces.isDisjoint(with: currentSpaces)
+            } else {
+                resolvedOnCurrentSpace = cgInfo.isOnScreen
+            }
+
             itemsByID[wid] = WindowItem(
                 id: wid,
                 pid: pid,
@@ -555,7 +689,7 @@ final class WindowService {
                 runningApp: app,
                 isMinimized: isMin,
                 isFullScreen: isFS,
-                isOnScreen: cgInfo.isOnScreen,
+                isOnScreen: resolvedOnCurrentSpace,
                 isWindowlessApp: false,
                 thumbnail: getCachedThumbnail(for: wid)
             )
