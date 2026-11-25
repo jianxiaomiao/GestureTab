@@ -9,6 +9,9 @@ final class DockPreviewViewModel: ObservableObject {
     @Published var appIcon: NSImage? = nil
     @Published var windows: [WindowItem] = []
     @Published var hoveredWindowID: CGWindowID? = nil
+    @Published var peekingWindowID: CGWindowID? = nil
+    @Published var pointerAlignmentOffset: CGFloat = 0
+    @Published var showBottomPointer: Bool = true
 }
 
 /// 程序坞（Dock）悬停缩略图预览控制器（类 Windows 任务栏悬停预览）
@@ -30,6 +33,17 @@ final class DockPreviewManager {
         let screen: NSScreen
     }
 
+    private struct FastFilterState {
+        var isVisible: Bool = false
+        var hasPending: Bool = false
+        var primaryScreenHeight: CGFloat = 900
+        var screenFrames: [CGRect] = []
+    }
+
+    private let fastStateLock = NSLock()
+    private var fastState = FastFilterState()
+    private var screenObserver: NSObjectProtocol?
+
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isRunning = false
@@ -50,12 +64,17 @@ final class DockPreviewManager {
     private var showWorkItem: DispatchWorkItem?
     private var hideWorkItem: DispatchWorkItem?
 
+    // 悬停卡片「瞄一眼（Peek）」状态
+    private var peekWorkItem: DispatchWorkItem?
+    private var peekPreFrontWindow: (app: NSRunningApplication, axWin: AXUIElement)?
+
     private let cardWidth: CGFloat = 212
     private let cardHeight: CGFloat = 152
     private let cardSpacing: CGFloat = 10
     private let hPadding: CGFloat = 14
     private let vPadding: CGFloat = 12
     private let headerHeight: CGFloat = 26
+    private let pointerAreaHeight: CGFloat = 8
 
     private init() {}
 
@@ -67,6 +86,17 @@ final class DockPreviewManager {
         guard !isRunning else { return }
         guard AppSettings.shared.dockPreviewEnabled else { return }
         guard WindowService.hasAccessibilityPermission(prompt: false) else { return }
+
+        refreshCachedScreenMetrics()
+        if screenObserver == nil {
+            screenObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.refreshCachedScreenMetrics()
+            }
+        }
 
         let mask: CGEventMask =
             (1 << CGEventType.mouseMoved.rawValue)
@@ -102,6 +132,10 @@ final class DockPreviewManager {
     func stop() {
         guard isRunning else { return }
         hideImmediately()
+        if let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver)
+            self.screenObserver = nil
+        }
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
@@ -113,15 +147,55 @@ final class DockPreviewManager {
         isRunning = false
     }
 
-    func hideImmediately() {
+    func hideImmediately(restorePeek: Bool = true) {
         cancelShowTimer()
         cancelHideTimer()
+        cancelPeek(restorePrevious: restorePeek)
         currentHoveredPID = nil
         currentIconCocoaRect = .zero
         pendingPID = nil
         pendingHit = nil
         viewModel.hoveredWindowID = nil
+        viewModel.peekingWindowID = nil
         panel?.orderOut(nil)
+        updateFastVisibility(visible: false, pending: false)
+    }
+
+    private func refreshCachedScreenMetrics() {
+        let frames = NSScreen.screens.map(\.frame)
+        let primaryH = frames.first?.height ?? 900
+        fastStateLock.lock()
+        fastState.screenFrames = frames
+        fastState.primaryScreenHeight = primaryH
+        fastStateLock.unlock()
+    }
+
+    private func updateFastVisibility(visible: Bool? = nil, pending: Bool? = nil) {
+        fastStateLock.lock()
+        if let visible { fastState.isVisible = visible }
+        if let pending { fastState.hasPending = pending }
+        fastStateLock.unlock()
+    }
+
+    /// 在 EventTap 线程直接短路：鼠标远离屏幕底/左/右 Dock 边缘且面板未显示时，0 次主线程派发
+    private func shouldDispatchMouseMove(axPoint: CGPoint) -> Bool {
+        fastStateLock.lock()
+        let state = fastState
+        fastStateLock.unlock()
+
+        if state.isVisible || state.hasPending {
+            return true
+        }
+        let cocoaPt = CGPoint(x: axPoint.x, y: state.primaryScreenHeight - axPoint.y)
+        let edgeDepth: CGFloat = 120
+        for sf in state.screenFrames {
+            if sf.contains(cocoaPt) {
+                return cocoaPt.y <= sf.minY + edgeDepth
+                    || cocoaPt.x <= sf.minX + edgeDepth
+                    || cocoaPt.x >= sf.maxX - edgeDepth
+            }
+        }
+        return false
     }
 
     // MARK: - Event Handling
@@ -135,7 +209,10 @@ final class DockPreviewManager {
         }
 
         guard AppSettings.shared.dockPreviewEnabled else {
-            if isVisible {
+            fastStateLock.lock()
+            let wasVis = fastState.isVisible
+            fastStateLock.unlock()
+            if wasVis {
                 DispatchQueue.main.async { [weak self] in self?.hideImmediately() }
             }
             return
@@ -145,22 +222,31 @@ final class DockPreviewManager {
 
         switch type {
         case .leftMouseDown:
-            if isVisible {
-                let cocoaLoc = axPointToCocoa(axLoc)
+            fastStateLock.lock()
+            let vis = fastState.isVisible
+            let primaryH = fastState.primaryScreenHeight
+            fastStateLock.unlock()
+            if vis {
+                let cocoaLoc = CGPoint(x: axLoc.x, y: primaryH - axLoc.y)
                 DispatchQueue.main.async { [weak self] in
                     guard let self, let panel = self.panel, panel.isVisible else { return }
                     if !panel.frame.contains(cocoaLoc) {
-                        self.hideImmediately()
+                        // 点击面板外部（例如直接点击 Dock 图标本身）时隐藏预览且不再还原 Peek 覆盖用户点击
+                        self.hideImmediately(restorePeek: false)
                     }
                 }
             }
         case .rightMouseDown:
-            if isVisible || pendingPID != nil {
+            fastStateLock.lock()
+            let active = fastState.isVisible || fastState.hasPending
+            fastStateLock.unlock()
+            if active {
                 DispatchQueue.main.async { [weak self] in
                     self?.hideImmediately()
                 }
             }
         case .mouseMoved:
+            guard shouldDispatchMouseMove(axPoint: axLoc) else { return }
             DispatchQueue.main.async { [weak self] in
                 self?.processMouseMoved(axPoint: axLoc)
             }
@@ -242,10 +328,12 @@ final class DockPreviewManager {
         cancelShowTimer()
         pendingPID = targetPID
         pendingHit = hit
+        updateFastVisibility(pending: true)
         let work = DispatchWorkItem { [weak self] in
             guard let self, let latestHit = self.pendingHit else { return }
             self.pendingPID = nil
             self.pendingHit = nil
+            self.updateFastVisibility(pending: false)
             guard self.shouldSuppressPreview?() != true else { return }
             self.presentPreview(for: latestHit, animatedMove: false)
         }
@@ -368,17 +456,12 @@ final class DockPreviewManager {
             return
         }
 
+        cancelPeek(restorePrevious: true)
         currentHoveredPID = hit.app.processIdentifier
         currentIconCocoaRect = hit.iconCocoaRect
         currentScreen = hit.screen
         currentDockEdge = detectDockEdge(iconRect: hit.iconCocoaRect, screen: hit.screen)
 
-        viewModel.appName = hit.app.localizedName ?? "App"
-        viewModel.appIcon = hit.app.icon
-        viewModel.windows = windows
-        viewModel.hoveredWindowID = nil
-
-        ensurePanel()
         let targetFrame = computePanelFrame(
             windowCount: windows.count,
             iconRect: hit.iconCocoaRect,
@@ -386,25 +469,46 @@ final class DockPreviewManager {
             edge: currentDockEdge
         )
 
+        // 计算底部指向 Dock 图标的小指示箭头偏移
+        let maxOffset = max(0, targetFrame.width / 2 - 24)
+        let rawOffset = hit.iconCocoaRect.midX - targetFrame.midX
+        viewModel.showBottomPointer = (currentDockEdge == .bottom)
+        viewModel.pointerAlignmentOffset = max(-maxOffset, min(maxOffset, rawOffset))
+
+        withAnimation(.easeOut(duration: 0.14)) {
+            viewModel.appName = hit.app.localizedName ?? "App"
+            viewModel.appIcon = hit.app.icon
+            viewModel.windows = windows
+            viewModel.hoveredWindowID = nil
+            viewModel.peekingWindowID = nil
+        }
+
+        ensurePanel()
         guard let panel else { return }
         if !panel.isVisible {
-            panel.setFrame(targetFrame, display: true)
+            var startFrame = targetFrame
+            if currentDockEdge == .bottom {
+                startFrame.origin.y -= 8
+            }
+            panel.setFrame(startFrame, display: true)
             panel.alphaValue = 0
             panel.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.14
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.duration = 0.15
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.08, 0.36, 1.0)
                 panel.animator().alphaValue = 1
+                panel.animator().setFrame(targetFrame, display: true)
             }
         } else if animatedMove {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.14
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.duration = 0.16
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.05, 0.36, 1.0)
                 panel.animator().setFrame(targetFrame, display: true)
             }
         } else {
             panel.setFrame(targetFrame, display: true)
         }
+        updateFastVisibility(visible: true, pending: false)
 
         // 异步补抓/刷新最新缩略图
         let targetPID = hit.app.processIdentifier
@@ -448,13 +552,57 @@ final class DockPreviewManager {
             },
             onClose: { [weak self] item in
                 self?.closeWindow(item)
+            },
+            onHoverWindow: { [weak self] item in
+                self?.handleCardHoverChanged(item)
             }
         ))
         self.panel = p
     }
 
+    private func handleCardHoverChanged(_ item: WindowItem?) {
+        peekWorkItem?.cancel()
+        peekWorkItem = nil
+
+        guard let item else {
+            cancelPeek(restorePrevious: true)
+            return
+        }
+
+        guard AppSettings.shared.dockHoverPeekEnabled,
+              !item.isMinimized,
+              !item.isFullScreen,
+              item.isOnScreen else {
+            return
+        }
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isVisible, self.viewModel.hoveredWindowID == item.id else { return }
+            if self.peekPreFrontWindow == nil,
+               let front = WindowService.shared.getFrontmostAXWindow() {
+                self.peekPreFrontWindow = (front.app, front.axWin)
+            }
+            WindowService.shared.raiseWindowForPeek(item)
+            self.viewModel.peekingWindowID = item.id
+        }
+        peekWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+    }
+
+    private func cancelPeek(restorePrevious: Bool) {
+        peekWorkItem?.cancel()
+        peekWorkItem = nil
+        viewModel.peekingWindowID = nil
+        if restorePrevious, let prev = peekPreFrontWindow {
+            peekPreFrontWindow = nil
+            WindowService.shared.restoreWindowAfterPeek(app: prev.app, axWin: prev.axWin)
+        } else if !restorePrevious {
+            peekPreFrontWindow = nil
+        }
+    }
+
     private func activateWindow(_ item: WindowItem) {
-        hideImmediately()
+        hideImmediately(restorePeek: false)
         WindowService.shared.activateWindow(item)
         if AppSettings.shared.hapticEnabled {
             NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
@@ -473,7 +621,9 @@ final class DockPreviewManager {
 
     private func closeWindow(_ item: WindowItem) {
         guard WindowService.shared.closeWindow(item) else { return }
-        viewModel.windows.removeAll { $0.id == item.id }
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
+            viewModel.windows.removeAll { $0.id == item.id }
+        }
         if AppSettings.shared.hapticEnabled {
             NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
         }
@@ -490,9 +640,13 @@ final class DockPreviewManager {
                 screen: screen,
                 edge: currentDockEdge
             )
+            let maxOffset = max(0, newFrame.width / 2 - 24)
+            let rawOffset = currentIconCocoaRect.midX - newFrame.midX
+            viewModel.pointerAlignmentOffset = max(-maxOffset, min(maxOffset, rawOffset))
+
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.14
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.duration = 0.16
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.05, 0.36, 1.0)
                 panel?.animator().setFrame(newFrame, display: true)
             }
         }
@@ -526,7 +680,8 @@ final class DockPreviewManager {
         let maxW = max(cardWidth + hPadding * 2, sf.width - 48)
         let idealW = hPadding * 2 + CGFloat(count) * cardWidth + CGFloat(count - 1) * cardSpacing
         let panelW = min(idealW, maxW)
-        let panelH = vPadding * 2 + headerHeight + 8 + cardHeight
+        let extraPointerH: CGFloat = (edge == .bottom) ? pointerAreaHeight : 0
+        let panelH = vPadding * 2 + headerHeight + 8 + cardHeight + extraPointerH
 
         var originX: CGFloat
         var originY: CGFloat
@@ -534,7 +689,7 @@ final class DockPreviewManager {
         switch edge {
         case .bottom:
             originX = round(iconRect.midX - panelW / 2)
-            originY = round(iconRect.maxY + 12)
+            originY = round(iconRect.maxY + 6)
         case .left:
             originX = round(iconRect.maxX + 12)
             originY = round(iconRect.midY - panelH / 2)
@@ -603,6 +758,7 @@ final class DockPreviewManager {
         showWorkItem = nil
         pendingPID = nil
         pendingHit = nil
+        updateFastVisibility(pending: false)
     }
 
     private func cancelHideTimer() {
@@ -634,65 +790,99 @@ private struct DockPreviewView: View {
     let onSelect: (WindowItem) -> Void
     let onToggleMinimize: (WindowItem) -> Void
     let onClose: (WindowItem) -> Void
+    let onHoverWindow: (WindowItem?) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // 顶栏：App 图标 + 名称 + 窗口计数
-            HStack(spacing: 8) {
-                if let icon = viewModel.appIcon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 18, height: 18)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                // 顶栏：App 图标 + 名称 + 窗口计数 + Peek 状态提示
+                HStack(spacing: 8) {
+                    if let icon = viewModel.appIcon {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 18, height: 18)
+                    }
+                    Text(viewModel.appName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    Text("\(viewModel.windows.count) 个窗口")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                    Spacer(minLength: 0)
+                    if viewModel.peekingWindowID != nil {
+                        Label("正在预览", systemImage: "eye.fill")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundColor(Color(nsColor: .controlAccentColor))
+                            .transition(.opacity)
+                    }
                 }
-                Text(viewModel.appName)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.primary)
-                    .lineLimit(1)
-                Text("\(viewModel.windows.count) 个窗口")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.primary.opacity(0.08)))
-                Spacer(minLength: 0)
-            }
-            .frame(height: headerHeight)
+                .frame(height: headerHeight)
 
-            // 窗口缩略图横向条
-            ScrollView(.horizontal, showsIndicators: viewModel.windows.count > 5) {
-                HStack(spacing: cardSpacing) {
-                    ForEach(viewModel.windows) { item in
-                        DockPreviewCard(
-                            item: item,
-                            width: cardWidth,
-                            height: cardHeight,
-                            isHovered: viewModel.hoveredWindowID == item.id,
-                            onSelect: { onSelect(item) },
-                            onToggleMinimize: { onToggleMinimize(item) },
-                            onClose: { onClose(item) }
-                        )
-                        .onHover { hovering in
-                            if hovering {
-                                viewModel.hoveredWindowID = item.id
-                            } else if viewModel.hoveredWindowID == item.id {
-                                viewModel.hoveredWindowID = nil
+                // 窗口缩略图横向条
+                ScrollView(.horizontal, showsIndicators: viewModel.windows.count > 5) {
+                    HStack(spacing: cardSpacing) {
+                        ForEach(viewModel.windows) { item in
+                            DockPreviewCard(
+                                item: item,
+                                width: cardWidth,
+                                height: cardHeight,
+                                isHovered: viewModel.hoveredWindowID == item.id,
+                                isPeeking: viewModel.peekingWindowID == item.id,
+                                onSelect: { onSelect(item) },
+                                onToggleMinimize: { onToggleMinimize(item) },
+                                onClose: { onClose(item) }
+                            )
+                            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                            .onHover { hovering in
+                                if hovering {
+                                    viewModel.hoveredWindowID = item.id
+                                    onHoverWindow(item)
+                                } else if viewModel.hoveredWindowID == item.id {
+                                    viewModel.hoveredWindowID = nil
+                                    onHoverWindow(nil)
+                                }
                             }
                         }
                     }
+                    .animation(.spring(response: 0.22, dampingFraction: 0.86), value: viewModel.windows.map(\.id))
                 }
             }
-        }
-        .padding(.horizontal, hPadding)
-        .padding(.vertical, vPadding)
-        .background(
-            ZStack {
-                VisualEffectBackdrop(material: .hudWindow, blendingMode: .behindWindow)
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.24), lineWidth: 1)
+            .padding(.horizontal, hPadding)
+            .padding(.vertical, vPadding)
+            .background(
+                ZStack {
+                    VisualEffectBackdrop(material: .hudWindow, blendingMode: .behindWindow)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.white.opacity(0.24), lineWidth: 1)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            )
+
+            // 指向当前悬停 Dock 图标的小指示箭头（仅底部 Dock 模式）
+            if viewModel.showBottomPointer {
+                DockPointerTriangle()
+                    .fill(Color.white.opacity(0.32))
+                    .frame(width: 14, height: 7)
+                    .offset(x: viewModel.pointerAlignmentOffset)
+                    .animation(.easeOut(duration: 0.14), value: viewModel.pointerAlignmentOffset)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        )
+        }
+    }
+}
+
+private struct DockPointerTriangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.closeSubpath()
+        return path
     }
 }
 
@@ -701,6 +891,7 @@ private struct DockPreviewCard: View {
     let width: CGFloat
     let height: CGFloat
     let isHovered: Bool
+    let isPeeking: Bool
     let onSelect: () -> Void
     let onToggleMinimize: () -> Void
     let onClose: () -> Void
@@ -781,15 +972,17 @@ private struct DockPreviewCard: View {
         .frame(width: width, height: height)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isHovered ? Color(nsColor: .controlAccentColor).opacity(0.18) : Color.primary.opacity(0.06))
+                .fill(isHovered ? Color(nsColor: .controlAccentColor).opacity(isPeeking ? 0.24 : 0.18) : Color.primary.opacity(0.06))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(
                     isHovered ? Color(nsColor: .controlAccentColor) : Color.white.opacity(0.12),
-                    lineWidth: isHovered ? 2 : 1
+                    lineWidth: isPeeking ? 2.5 : (isHovered ? 2 : 1)
                 )
         )
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .animation(.easeOut(duration: 0.14), value: isPeeking)
     }
 
     private var statusBadge: String? {

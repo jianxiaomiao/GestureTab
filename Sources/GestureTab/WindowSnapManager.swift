@@ -20,8 +20,9 @@ final class WindowSnapManager {
     private let previewOverlay = SnapPreviewOverlayController()
     private let layoutBar = SnapLayoutBarController()
     private var currentTarget: SnapTarget?
+    private var lastEvaluatedAXPoint: CGPoint?
 
-    /// 记录已被分屏/最大化的窗口原始尺寸，拖离边缘时自动还原
+    /// 记录已被分屏/最大化的窗口原始尺寸，拖离边缘或按退格快捷键时自动还原
     private var snappedOriginalFrames: [CGWindowID: CGRect] = [:]
 
     var isDraggingWindow: Bool {
@@ -190,7 +191,106 @@ final class WindowSnapManager {
                 dragState = .dragging(axWin: axWin, wid: wid, startFrame: startFrame, restoredOnce: true)
             }
 
+            if let last = lastEvaluatedAXPoint,
+               hypot(axLocation.x - last.x, axLocation.y - last.y) < 2.0 {
+                return
+            }
+            lastEvaluatedAXPoint = axLocation
             evaluateHotZones(at: axLocation)
+        }
+    }
+
+    // MARK: - Keyboard Snap Shortcuts (Control + Option + Arrow / Enter / U I J K / Backspace)
+
+    /// 供全局 EventTap 同步调用：返回 true 表示命中键盘分屏快捷键并已消费该按键
+    func handleKeyboardSnap(keyCode: Int64) -> Bool {
+        guard AppSettings.shared.keyboardSnapEnabled else { return false }
+
+        enum Action {
+            case snap(layout: SnapLayout, zoneIndex: Int)
+            case restore
+        }
+
+        let action: Action
+        switch keyCode {
+        case 123: action = .snap(layout: .halves, zoneIndex: 0)      // ← 左半屏
+        case 124: action = .snap(layout: .halves, zoneIndex: 1)      // → 右半屏
+        case 126: action = .snap(layout: .topBottom, zoneIndex: 0)   // ↑ 上半屏
+        case 125: action = .snap(layout: .topBottom, zoneIndex: 1)   // ↓ 下半屏
+        case 36, 76: action = .snap(layout: .maximize, zoneIndex: 0) // Return / Enter 最大化
+        case 32: action = .snap(layout: .quarters, zoneIndex: 0)     // U 左上 1/4
+        case 34: action = .snap(layout: .quarters, zoneIndex: 1)     // I 右上 1/4
+        case 38: action = .snap(layout: .quarters, zoneIndex: 2)     // J 左下 1/4
+        case 40: action = .snap(layout: .quarters, zoneIndex: 3)     // K 右下 1/4
+        case 51: action = .restore                                    // Backspace 还原原尺寸
+        default:
+            return false
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            switch action {
+            case .snap(let layout, let zoneIndex):
+                self.performKeyboardSnap(layout: layout, zoneIndex: zoneIndex)
+            case .restore:
+                self.restoreFrontmostWindowFrame()
+            }
+        }
+        return true
+    }
+
+    private func performKeyboardSnap(layout: SnapLayout, zoneIndex: Int) {
+        SnapAssistController.shared.dismiss()
+        guard let front = WindowService.shared.getFrontmostAXWindow(),
+              let currentFrame = WindowService.shared.getWindowFrame(front.axWin) else {
+            return
+        }
+
+        let cocoaFrame = WindowService.axRectToCocoaRect(currentFrame)
+        let center = CGPoint(x: cocoaFrame.midX, y: cocoaFrame.midY)
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(center) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first else {
+            return
+        }
+
+        if let wid = front.wid, snappedOriginalFrames[wid] == nil {
+            snappedOriginalFrames[wid] = currentFrame
+        }
+
+        let target = SnapTarget(screen: screen, layout: layout, zoneIndex: zoneIndex)
+        let targetAXRect = target.axRect
+        WindowService.shared.setWindowFrame(front.axWin, axFrame: targetAXRect)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+            WindowService.shared.setWindowFrame(front.axWin, axFrame: targetAXRect)
+        }
+
+        if AppSettings.shared.hapticEnabled {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        }
+
+        if AppSettings.shared.snapAssistEnabled && layout.zones.count > 1 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                SnapAssistController.shared.begin(
+                    on: screen,
+                    layout: layout,
+                    filledZoneIndex: zoneIndex,
+                    primaryWindowID: front.wid
+                )
+            }
+        }
+    }
+
+    private func restoreFrontmostWindowFrame() {
+        SnapAssistController.shared.dismiss()
+        guard let front = WindowService.shared.getFrontmostAXWindow(),
+              let wid = front.wid,
+              let origFrame = snappedOriginalFrames.removeValue(forKey: wid) else {
+            return
+        }
+        WindowService.shared.setWindowFrame(front.axWin, axFrame: origFrame)
+        if AppSettings.shared.hapticEnabled {
+            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
         }
     }
 
@@ -235,6 +335,7 @@ final class WindowSnapManager {
     private func resetDrag() {
         dragState = .idle
         currentTarget = nil
+        lastEvaluatedAXPoint = nil
         previewOverlay.hide()
         layoutBar.hide()
     }

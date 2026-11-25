@@ -92,6 +92,10 @@ final class MultitouchManager {
     var onPressQ: (() -> Void)?
     var onPressW: (() -> Void)?
     var onPressM: (() -> Void)?
+    /// 键盘分屏快捷键回调（Control + Option + 方向键/回车/U/I/J/K/退格）
+    var onKeyboardSnap: ((_ keyCode: Int64) -> Bool)?
+    /// 多任务面板内搜索模式输入回调
+    var onSearchKey: ((_ keyCode: Int64, _ text: String?, _ isCommandF: Bool) -> Void)?
 
     private var frameworkHandle: UnsafeMutableRawPointer?
     private var devices: [UnsafeMutableRawPointer] = []
@@ -105,6 +109,7 @@ final class MultitouchManager {
     private let lock = NSLock()
     private var state: State = .idle
     private var previousTouches: [Int32: (x: Float, y: Float)] = [:]
+    private var scratchTouches: [Int32: (x: Float, y: Float)] = [:]
     private var stepAccumX: Double = 0
     private var stepAccumY: Double = 0
     private var lastStepTimestamp: Double = 0
@@ -135,6 +140,7 @@ final class MultitouchManager {
     private var suppressedMouseDown = false
     private var scrollBlockGraceUntil: TimeInterval = 0
     private var isSwitcherVisibleFlag = false
+    private var isSearchModeFlag = false
 
     private var wakeObserver: NSObjectProtocol?
     private var eventTap: CFMachPort?
@@ -232,6 +238,15 @@ final class MultitouchManager {
     func setSwitcherVisible(_ visible: Bool) {
         lock.lock()
         isSwitcherVisibleFlag = visible
+        if !visible {
+            isSearchModeFlag = false
+        }
+        lock.unlock()
+    }
+
+    func setSearchModeActive(_ active: Bool) {
+        lock.lock()
+        isSearchModeFlag = active
         lock.unlock()
     }
 
@@ -383,21 +398,37 @@ final class MultitouchManager {
     }
 
     fileprivate func handleTouches(_ touches: [(id: Int32, x: Float, y: Float)], timestamp: Double) {
-        let mode = AppSettings.shared.gestureMode
-        let hStep = AppSettings.shared.horizontalStep
-        let vStep = AppSettings.shared.verticalStep
-        let haptic = AppSettings.shared.hapticEnabled
+        let count = touches.count
+
+        // 极速零分配早退：常规 0~2 指浏览网页/滚动且当前处于 idle 时，跳过所有字典构建与设置读取
+        lock.lock()
+        if count <= 2, case .idle = state {
+            if !previousTouches.isEmpty {
+                previousTouches.removeAll(keepingCapacity: true)
+            }
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        let settings = AppSettings.shared
+        let mode = settings.gestureMode
+        let hStep = settings.horizontalStep
+        let vStep = settings.verticalStep
+        let haptic = settings.hapticEnabled
         let now = ProcessInfo.processInfo.systemUptime
 
-        var currentMap: [Int32: (x: Float, y: Float)] = [:]
         var sumX: Double = 0
         var sumY: Double = 0
         var minX: Double = 1.0
         var maxX: Double = 0.0
         var minY: Double = 1.0
         var maxY: Double = 0.0
+
+        lock.lock()
+        scratchTouches.removeAll(keepingCapacity: true)
         for t in touches {
-            currentMap[t.id] = (t.x, t.y)
+            scratchTouches[t.id] = (t.x, t.y)
             let tx = Double(t.x)
             let ty = Double(t.y)
             sumX += tx
@@ -407,14 +438,12 @@ final class MultitouchManager {
             if ty < minY { minY = ty }
             if ty > maxY { maxY = ty }
         }
-
-        lock.lock()
+        let currentMap = scratchTouches
         defer {
-            previousTouches = currentMap
+            swap(&previousTouches, &scratchTouches)
             lock.unlock()
         }
 
-        let count = touches.count
         if count > 0 {
             currentCentroidX = sumX / Double(count)
             currentCentroidY = sumY / Double(count)
@@ -702,12 +731,22 @@ final class MultitouchManager {
             if type == .keyDown {
                 manager.lock.lock()
                 let visible = manager.isSwitcherVisibleFlag
+                let searching = manager.isSearchModeFlag
                 manager.lock.unlock()
 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 let flags = event.flags
-                let hasCmdOrCtrl = flags.contains(.maskCommand) || flags.contains(.maskControl)
+                let hasCmd = flags.contains(.maskCommand)
+                let hasCtrl = flags.contains(.maskControl)
+                let hasCmdOrCtrl = hasCmd || hasCtrl
                 let hasOption = flags.contains(.maskAlternate)
+
+                // Control + Option 键盘分屏快捷键（非切换面板激活时生效，且不带 Command）
+                if !visible && AppSettings.shared.keyboardSnapEnabled && hasCtrl && hasOption && !hasCmd {
+                    if let handler = manager.onKeyboardSnap, handler(keyCode) {
+                        return nil
+                    }
+                }
 
                 // Option + Tab / Option + Shift + Tab 呼出持久模式或在已打开时步进
                 if AppSettings.shared.optionTabEnabled && keyCode == 48 && hasOption && !hasCmdOrCtrl {
@@ -723,10 +762,67 @@ final class MultitouchManager {
                 }
 
                 if visible {
+                    // Command + F 随时开启/切换搜索过滤
+                    if hasCmd && !hasCtrl && !hasOption && keyCode == 3 {
+                        DispatchQueue.main.async {
+                            manager.onSearchKey?(keyCode, nil, true)
+                        }
+                        return nil
+                    }
+
                     let hasModifier = hasCmdOrCtrl || hasOption
 
                     if !hasModifier {
+                        // 搜索模式下：方向键/Tab/回车/Esc 走导航与退出，其他字符输入过滤词（避免误触 Q/W/M）
+                        if searching {
+                            switch keyCode {
+                            case 53: // Esc 退出搜索（再次按 Esc 才关闭面板）
+                                DispatchQueue.main.async {
+                                    manager.onSearchKey?(53, nil, false)
+                                }
+                                return nil
+                            case 48: // Tab / Shift+Tab
+                                let reverse = flags.contains(.maskShift)
+                                DispatchQueue.main.async {
+                                    manager.onStep?(reverse ? -1 : 1, 0)
+                                }
+                                return nil
+                            case 123:
+                                DispatchQueue.main.async { manager.onStep?(-1, 0) }
+                                return nil
+                            case 124:
+                                DispatchQueue.main.async { manager.onStep?(1, 0) }
+                                return nil
+                            case 125:
+                                DispatchQueue.main.async { manager.onStep?(0, 1) }
+                                return nil
+                            case 126:
+                                DispatchQueue.main.async { manager.onStep?(0, -1) }
+                                return nil
+                            case 36, 76: // Enter 确认进入选中结果
+                                DispatchQueue.main.async { manager.onForceCommit?() }
+                                return nil
+                            case 51: // Backspace 删除搜索字符
+                                DispatchQueue.main.async { manager.onSearchKey?(51, nil, false) }
+                                return nil
+                            default:
+                                let text = MultitouchManager.extractPrintableString(from: event)
+                                if let text, !text.isEmpty {
+                                    DispatchQueue.main.async {
+                                        manager.onSearchKey?(keyCode, text, false)
+                                    }
+                                    return nil
+                                }
+                            }
+                            return nil
+                        }
+
                         switch keyCode {
+                        case 44: // '/' 键快速进入窗口搜索过滤模式
+                            DispatchQueue.main.async {
+                                manager.onSearchKey?(44, nil, true)
+                            }
+                            return nil
                         case 53: // Esc 取消
                             DispatchQueue.main.async {
                                 manager.cancelCurrentGesture()
@@ -859,5 +955,15 @@ final class MultitouchManager {
         }
         eventTap = nil
         eventTapSource = nil
+    }
+
+    private static func extractPrintableString(from event: CGEvent) -> String? {
+        var length = 0
+        var buffer = [UniChar](repeating: 0, count: 8)
+        event.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &length, unicodeString: &buffer)
+        guard length > 0 else { return nil }
+        let str = String(utf16CodeUnits: buffer, count: length)
+        let filtered = str.filter { !$0.isNewline && (!$0.isASCII || ($0.asciiValue ?? 0) >= 32) }
+        return filtered.isEmpty ? nil : filtered
     }
 }

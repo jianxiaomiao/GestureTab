@@ -2,7 +2,9 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import ImageIO
 import ScreenCaptureKit
+import UniformTypeIdentifiers
 
 @_silgen_name("_AXUIElementGetWindow")
 private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
@@ -136,6 +138,7 @@ final class WindowService {
 
     private let thumbnailLock = NSLock()
     private var thumbnailCache: [CGWindowID: NSImage] = [:]
+    private var lastDiskSaveTime: [CGWindowID: CFAbsoluteTime] = [:]
 
     private let axCacheLock = NSLock()
     private var axElementCache: [CGWindowID: AXUIElement] = [:]
@@ -145,8 +148,13 @@ final class WindowService {
 
     private var appActivateObserver: NSObjectProtocol?
     private var spaceChangeObserver: NSObjectProtocol?
+    private var screenSleepObserver: NSObjectProtocol?
+    private var screenWakeObserver: NSObjectProtocol?
+    private var sessionResignObserver: NSObjectProtocol?
+    private var sessionActiveObserver: NSObjectProtocol?
     private var backgroundTimer: Timer?
     private var isCapturingBackground = false
+    private var isSystemInactive = false
 
     private lazy var diskCacheDir: URL? = {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
@@ -193,21 +201,74 @@ final class WindowService {
             }
         }
 
-        // 每 2.5 秒低开销缓存一次当前可见窗口画面与句柄
-        backgroundTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+        let wsNC = NSWorkspace.shared.notificationCenter
+        screenSleepObserver = wsNC.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.isSystemInactive = true
+        }
+        screenWakeObserver = wsNC.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.isSystemInactive = false
             self?.warmAXElementCache()
-            self?.captureVisibleThumbnailsInBackground()
+        }
+        sessionResignObserver = wsNC.addObserver(
+            forName: NSWorkspace.sessionDidResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.isSystemInactive = true
+        }
+        sessionActiveObserver = wsNC.addObserver(
+            forName: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.isSystemInactive = false
+        }
+
+        // 事件驱动为主 + 14 秒低频兜底缓存与过期内存清理（息屏/锁屏/长时间无操作时自动跳过，大幅降 CPU 与写盘）
+        backgroundTimer = Timer.scheduledTimer(withTimeInterval: 14.0, repeats: true) { [weak self] _ in
+            guard let self, !self.isSystemInactive else { return }
+            let anyInputType = CGEventType(rawValue: ~0) ?? .mouseMoved
+            let idleSeconds = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInputType)
+            if idleSeconds > 25 { return }
+            self.pruneStaleCaches()
+            self.warmAXElementCache()
+            self.captureVisibleThumbnailsInBackground()
         }
     }
 
     func stopMonitoring() {
+        let wsNC = NSWorkspace.shared.notificationCenter
         if let appActivateObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(appActivateObserver)
+            wsNC.removeObserver(appActivateObserver)
             self.appActivateObserver = nil
         }
         if let spaceChangeObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(spaceChangeObserver)
+            wsNC.removeObserver(spaceChangeObserver)
             self.spaceChangeObserver = nil
+        }
+        if let screenSleepObserver {
+            wsNC.removeObserver(screenSleepObserver)
+            self.screenSleepObserver = nil
+        }
+        if let screenWakeObserver {
+            wsNC.removeObserver(screenWakeObserver)
+            self.screenWakeObserver = nil
+        }
+        if let sessionResignObserver {
+            wsNC.removeObserver(sessionResignObserver)
+            self.sessionResignObserver = nil
+        }
+        if let sessionActiveObserver {
+            wsNC.removeObserver(sessionActiveObserver)
+            self.sessionActiveObserver = nil
         }
         backgroundTimer?.invalidate()
         backgroundTimer = nil
@@ -725,20 +786,64 @@ final class WindowService {
     }
 
     private func setCachedThumbnail(_ image: NSImage, for windowID: CGWindowID, saveToDisk: Bool = true) {
+        let now = CFAbsoluteTimeGetCurrent()
+        var shouldWriteDisk = false
+
         thumbnailLock.lock()
         thumbnailCache[windowID] = image
+        if saveToDisk {
+            let lastWrite = lastDiskSaveTime[windowID] ?? 0
+            if now - lastWrite >= 30.0 {
+                lastDiskSaveTime[windowID] = now
+                shouldWriteDisk = true
+            }
+        }
         thumbnailLock.unlock()
 
-        if saveToDisk, let dir = diskCacheDir {
+        // 直接使用 CGImageDestination 编码 JPEG 落盘（省掉昂贵的 TIFF 内存拷贝，且每窗口至少 30 秒节流一次）
+        if shouldWriteDisk, let dir = diskCacheDir,
+           let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             let fileURL = dir.appendingPathComponent("\(windowID).jpg")
             DispatchQueue.global(qos: .background).async {
-                guard let tiff = image.tiffRepresentation,
-                      let rep = NSBitmapImageRep(data: tiff),
-                      let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.72]) else {
-                    return
-                }
-                try? jpeg.write(to: fileURL, options: .atomic)
+                guard let dest = CGImageDestinationCreateWithURL(
+                    fileURL as CFURL,
+                    UTType.jpeg.identifier as CFString,
+                    1,
+                    nil
+                ) else { return }
+                let opts = [kCGImageDestinationLossyCompressionQuality: 0.72] as CFDictionary
+                CGImageDestinationAddImage(dest, cgImage, opts)
+                CGImageDestinationFinalize(dest)
             }
+        }
+    }
+
+    /// 定期清理已关闭窗口的缩略图与 AX 句柄缓存，防止长时间后台运行内存增长
+    private func pruneStaleCaches() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let cgList = (CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+            var liveIDs = Set<CGWindowID>()
+            liveIDs.reserveCapacity(cgList.count)
+            for dict in cgList {
+                if let wid = dict[kCGWindowNumber as String] as? CGWindowID {
+                    liveIDs.insert(wid)
+                }
+            }
+            guard !liveIDs.isEmpty else { return }
+
+            self.thumbnailLock.lock()
+            for wid in self.thumbnailCache.keys where !liveIDs.contains(wid) {
+                self.thumbnailCache.removeValue(forKey: wid)
+                self.lastDiskSaveTime.removeValue(forKey: wid)
+            }
+            self.thumbnailLock.unlock()
+
+            self.axCacheLock.lock()
+            for wid in self.axElementCache.keys where !liveIDs.contains(wid) {
+                self.axElementCache.removeValue(forKey: wid)
+            }
+            self.axCacheLock.unlock()
         }
     }
 
@@ -1173,5 +1278,44 @@ final class WindowService {
             return wid
         }
         return nil
+    }
+
+    /// 获取当前前台应用的主窗口 AX 句柄与窗口 ID（供键盘分屏与 Dock Peek 还原使用）
+    func getFrontmostAXWindow() -> (app: NSRunningApplication, axWin: AXUIElement, wid: CGWindowID?)? {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication,
+              frontApp.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              !frontApp.isTerminated else {
+            return nil
+        }
+        let appAX = AXUIElementCreateApplication(frontApp.processIdentifier)
+        var focusedRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appAX, kAXFocusedWindowAttribute as CFString, &focusedRef) == .success,
+           let winRef = focusedRef {
+            let axWin = winRef as! AXUIElement
+            return (frontApp, axWin, getWindowID(for: axWin))
+        }
+        var mainRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appAX, kAXMainWindowAttribute as CFString, &mainRef) == .success,
+           let winRef = mainRef {
+            let axWin = winRef as! AXUIElement
+            return (frontApp, axWin, getWindowID(for: axWin))
+        }
+        return nil
+    }
+
+    /// 临时将指定窗口浮到最前预览（用于 Dock 悬停 Peek，不改变最小化状态）
+    func raiseWindowForPeek(_ item: WindowItem) {
+        guard !item.isMinimized, !item.isFullScreen, item.isOnScreen else { return }
+        if let ax = item.axElement ?? findAXWindow(pid: item.pid, windowID: item.id) {
+            AXUIElementPerformAction(ax, kAXRaiseAction as CFString)
+        }
+        item.runningApp?.activate(options: [])
+    }
+
+    /// 还原 Peek 前的前台窗口
+    func restoreWindowAfterPeek(app: NSRunningApplication, axWin: AXUIElement) {
+        guard !app.isTerminated else { return }
+        AXUIElementPerformAction(axWin, kAXRaiseAction as CFString)
+        app.activate(options: [])
     }
 }

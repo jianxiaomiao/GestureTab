@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 final class SwitcherViewModel: ObservableObject {
+    private var allItems: [WindowItem] = []
     @Published var items: [WindowItem] = []
     @Published var selectedIndex: Int = 0
     @Published var columns: Int = 6
@@ -11,6 +12,9 @@ final class SwitcherViewModel: ObservableObject {
     @Published var gridSpacing: CGFloat = 12
     @Published var isPersistentSession: Bool = false
     @Published var statusNotice: String? = nil
+    @Published var isSearching: Bool = false
+    @Published var searchQuery: String = ""
+    @Published var isPresented: Bool = false
 
     private var noticeWorkItem: DispatchWorkItem?
 
@@ -37,7 +41,10 @@ final class SwitcherViewModel: ObservableObject {
         persistent: Bool = false,
         reverseInitial: Bool = false
     ) {
+        self.allItems = items
         self.items = items
+        self.isSearching = false
+        self.searchQuery = ""
         self.displayStyle = style
         self.isPersistentSession = persistent
         computeLayout(for: items.count, screenSize: screenSize, style: style, preferredColumns: preferredColumns)
@@ -46,6 +53,50 @@ final class SwitcherViewModel: ObservableObject {
         } else {
             // 默认选中第 2 个窗口（即上一个使用的窗口），只有一个窗口时选中第 0 个
             self.selectedIndex = items.count > 1 ? 1 : 0
+        }
+    }
+
+    func enterSearchMode() {
+        isSearching = true
+        isPersistentSession = true
+        applySearchFilter(resetSelection: false)
+    }
+
+    func exitSearchMode() {
+        isSearching = false
+        searchQuery = ""
+        items = allItems
+        selectedIndex = min(selectedIndex, max(0, items.count - 1))
+    }
+
+    func appendSearchText(_ text: String) {
+        searchQuery.append(text)
+        applySearchFilter(resetSelection: true)
+    }
+
+    func deleteLastSearchChar() {
+        guard !searchQuery.isEmpty else { return }
+        searchQuery.removeLast()
+        applySearchFilter(resetSelection: true)
+    }
+
+    private func applySearchFilter(resetSelection: Bool) {
+        let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed.isEmpty {
+            items = allItems
+        } else {
+            let tokens = trimmed.split(separator: " ").map(String.init)
+            items = allItems.filter { item in
+                let haystack = "\(item.appName) \(item.displayTitle)".lowercased()
+                return tokens.allSatisfy { haystack.contains($0) }
+            }
+        }
+        if items.isEmpty {
+            selectedIndex = 0
+        } else if resetSelection {
+            selectedIndex = 0
+        } else {
+            selectedIndex = min(selectedIndex, items.count - 1)
         }
     }
 
@@ -124,6 +175,9 @@ final class SwitcherViewModel: ObservableObject {
     }
 
     func updateThumbnail(windowID: CGWindowID, image: NSImage) {
+        if let aIdx = allItems.firstIndex(where: { $0.id == windowID }) {
+            allItems[aIdx].thumbnail = image
+        }
         if let idx = items.firstIndex(where: { $0.id == windowID }) {
             items[idx].thumbnail = image
         }
@@ -156,6 +210,7 @@ final class SwitcherViewModel: ObservableObject {
     }
 
     func removeItem(id: CGWindowID) {
+        allItems.removeAll { $0.id == id }
         items.removeAll { $0.id == id }
         if !items.isEmpty {
             selectedIndex = min(selectedIndex, items.count - 1)
@@ -165,6 +220,7 @@ final class SwitcherViewModel: ObservableObject {
     }
 
     func removeItems(pid: pid_t) {
+        allItems.removeAll { $0.pid == pid }
         items.removeAll { $0.pid == pid }
         if !items.isEmpty {
             selectedIndex = min(selectedIndex, items.count - 1)
@@ -174,20 +230,23 @@ final class SwitcherViewModel: ObservableObject {
     }
 
     func setMinimized(windowID: CGWindowID, isMinimized: Bool) {
+        if let aIdx = allItems.firstIndex(where: { $0.id == windowID }) {
+            allItems[aIdx].isMinimized = isMinimized
+        }
         if let idx = items.firstIndex(where: { $0.id == windowID }) {
             items[idx].isMinimized = isMinimized
         }
     }
 
     func handleWindowClosed(windowID: CGWindowID, pid: pid_t) {
-        let hasOtherWindows = items.contains { $0.pid == pid && $0.id != windowID }
+        let hasOtherWindows = allItems.contains { $0.pid == pid && $0.id != windowID }
         if hasOtherWindows {
             removeItem(id: windowID)
-        } else if let idx = items.firstIndex(where: { $0.id == windowID }) {
+        } else if let aIdx = allItems.firstIndex(where: { $0.id == windowID }) {
             // 最后一个窗口被 W 关闭时，保留该应用为图标卡片，方便随时一键重新打开窗口
-            let old = items[idx]
+            let old = allItems[aIdx]
             let synID = WindowItem.syntheticID(for: pid)
-            items[idx] = WindowItem(
+            let replacement = WindowItem(
                 id: synID,
                 pid: pid,
                 appName: old.appName,
@@ -201,6 +260,10 @@ final class SwitcherViewModel: ObservableObject {
                 isWindowlessApp: true,
                 thumbnail: nil
             )
+            allItems[aIdx] = replacement
+            if let idx = items.firstIndex(where: { $0.id == windowID }) {
+                items[idx] = replacement
+            }
             WindowService.shared.bumpMRU(windowID: synID)
         }
     }
@@ -227,6 +290,7 @@ struct VisualEffectBackdrop: NSViewRepresentable {
 struct SwitcherView: View {
     @ObservedObject var viewModel: SwitcherViewModel
     @ObservedObject private var settings = AppSettings.shared
+    @Namespace private var selectionNamespace
     let onSelectAndCommit: (Int) -> Void
 
     private var gridColumns: [GridItem] {
@@ -243,14 +307,23 @@ struct SwitcherView: View {
                 missionControlBody
             }
         }
+        .scaleEffect(viewModel.isPresented ? 1.0 : 0.965)
+        .opacity(viewModel.isPresented ? 1.0 : 0.0)
+        .animation(.spring(response: 0.16, dampingFraction: 0.88), value: viewModel.isPresented)
     }
 
     // MARK: - 1. 紧凑悬浮面板（自动缩放，禁止滚动）
 
     private var compactPanelBody: some View {
         VStack(spacing: 10) {
+            if viewModel.isSearching {
+                searchBarPill(darkStyle: false)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 14)
+            }
+
             if viewModel.items.isEmpty {
-                emptyStateView(darkText: false)
+                emptyStateView(darkText: false, isFilteredEmpty: viewModel.isSearching && !viewModel.searchQuery.isEmpty)
                     .frame(width: 340, height: 140)
             } else {
                 LazyVGrid(columns: gridColumns, spacing: viewModel.gridSpacing) {
@@ -259,15 +332,17 @@ struct SwitcherView: View {
                             item: item,
                             cardWidth: viewModel.cardWidth,
                             cardHeight: viewModel.cardHeight,
-                            isSelected: index == viewModel.selectedIndex
+                            isSelected: index == viewModel.selectedIndex,
+                            selectionNamespace: selectionNamespace
                         )
                         .onTapGesture {
                             onSelectAndCommit(index)
                         }
                     }
                 }
+                .animation(.spring(response: 0.16, dampingFraction: 0.85), value: viewModel.selectedIndex)
                 .padding(.horizontal, 18)
-                .padding(.top, 16)
+                .padding(.top, viewModel.isSearching ? 4 : 16)
 
                 HStack(spacing: 16) {
                     if let notice = viewModel.statusNotice {
@@ -313,7 +388,11 @@ struct SwitcherView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 16) {
-                if let notice = viewModel.statusNotice {
+                if viewModel.isSearching {
+                    searchBarPill(darkStyle: true)
+                        .frame(maxWidth: 420)
+                        .padding(.top, 22)
+                } else if let notice = viewModel.statusNotice {
                     Text(notice)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.yellow)
@@ -337,7 +416,7 @@ struct SwitcherView: View {
                 Spacer(minLength: 4)
 
                 if viewModel.items.isEmpty {
-                    emptyStateView(darkText: true)
+                    emptyStateView(darkText: true, isFilteredEmpty: viewModel.isSearching && !viewModel.searchQuery.isEmpty)
                 } else {
                     LazyVGrid(columns: gridColumns, spacing: viewModel.gridSpacing) {
                         ForEach(Array(viewModel.items.enumerated()), id: \.element.id) { index, item in
@@ -345,13 +424,15 @@ struct SwitcherView: View {
                                 item: item,
                                 cardWidth: viewModel.cardWidth,
                                 cardHeight: viewModel.cardHeight,
-                                isSelected: index == viewModel.selectedIndex
+                                isSelected: index == viewModel.selectedIndex,
+                                selectionNamespace: selectionNamespace
                             )
                             .onTapGesture {
                                 onSelectAndCommit(index)
                             }
                         }
                     }
+                    .animation(.spring(response: 0.16, dampingFraction: 0.85), value: viewModel.selectedIndex)
                     .padding(.horizontal, 36)
                 }
 
@@ -365,7 +446,51 @@ struct SwitcherView: View {
         }
     }
 
+    private func searchBarPill(darkStyle: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color(nsColor: .controlAccentColor))
+
+            if viewModel.searchQuery.isEmpty {
+                Text("输入应用名或窗口标题快速筛选...")
+                    .font(.system(size: 13))
+                    .foregroundStyle(darkStyle ? Color.white.opacity(0.55) : .secondary)
+            } else {
+                Text(viewModel.searchQuery)
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(darkStyle ? Color.white : .primary)
+            }
+
+            Spacer(minLength: 8)
+
+            Text("\(viewModel.items.count) 项")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(darkStyle ? Color.white.opacity(0.7) : .secondary)
+
+            Text("Esc 退出搜索")
+                .font(.system(size: 10.5))
+                .foregroundStyle(darkStyle ? Color.white.opacity(0.55) : .secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(darkStyle ? Color.white.opacity(0.12) : Color.primary.opacity(0.08)))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(darkStyle ? Color.white.opacity(0.14) : Color.primary.opacity(0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color(nsColor: .controlAccentColor).opacity(0.75), lineWidth: 1.5)
+        )
+    }
+
     private func hintText(compact: Bool) -> String {
+        if viewModel.isSearching {
+            return "直接键入筛选 · 方向键/Tab 选窗 · 回车进入 · Esc 退出搜索"
+        }
         var parts: [String] = []
         if viewModel.isPersistentSession {
             parts.append("方向键/Tab/滑动选窗口")
@@ -374,19 +499,20 @@ struct SwitcherView: View {
             parts.append(compact ? "滑动选窗口" : "触控板滑动选择窗口")
             parts.append(compact ? "松手切入" : "松手立即进入")
         }
-        if settings.qQuitEnabled { parts.append("Q 退出程序") }
-        if settings.wCloseEnabled { parts.append("W 关闭窗口") }
+        parts.append("/ 或 ⌘F 搜索")
+        if settings.qQuitEnabled { parts.append("Q 退出") }
+        if settings.wCloseEnabled { parts.append("W 关窗") }
         if settings.mMinimizeEnabled { parts.append("M 最小化") }
         parts.append("Esc 取消")
         return parts.joined(separator: " · ")
     }
 
-    private func emptyStateView(darkText: Bool) -> some View {
+    private func emptyStateView(darkText: Bool, isFilteredEmpty: Bool = false) -> some View {
         VStack(spacing: 10) {
-            Image(systemName: "macwindow.on.rectangle")
+            Image(systemName: isFilteredEmpty ? "magnifyingglass" : "macwindow.on.rectangle")
                 .font(.system(size: 32))
                 .foregroundStyle(darkText ? Color.white.opacity(0.8) : .secondary)
-            Text("当前没有可切换的窗口")
+            Text(isFilteredEmpty ? "未找到匹配「\(viewModel.searchQuery)」的窗口" : "当前没有可切换的窗口")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(darkText ? Color.white.opacity(0.8) : .secondary)
         }
@@ -400,6 +526,7 @@ private struct CompactWindowCardView: View {
     let cardWidth: CGFloat
     let cardHeight: CGFloat
     let isSelected: Bool
+    let selectionNamespace: Namespace.ID
 
     var body: some View {
         let thumbHeight = max(52, cardHeight - 34)
@@ -461,17 +588,24 @@ private struct CompactWindowCardView: View {
         .padding(8)
         .frame(width: cardWidth, height: cardHeight)
         .background(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(isSelected ? Color(nsColor: .controlAccentColor).opacity(0.22) : Color.primary.opacity(0.035))
+            ZStack {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(Color.primary.opacity(0.035))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    )
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(Color(nsColor: .controlAccentColor).opacity(0.22))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .stroke(Color(nsColor: .controlAccentColor), lineWidth: 2.5)
+                        )
+                        .matchedGeometryEffect(id: "compactSelection", in: selectionNamespace)
+                }
+            }
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .stroke(
-                    isSelected ? Color(nsColor: .controlAccentColor) : Color.primary.opacity(0.08),
-                    lineWidth: isSelected ? 2.5 : 1
-                )
-        )
-        .animation(.easeOut(duration: 0.08), value: isSelected)
     }
 }
 
@@ -482,6 +616,7 @@ private struct MissionControlCardView: View {
     let cardWidth: CGFloat
     let cardHeight: CGFloat
     let isSelected: Bool
+    let selectionNamespace: Namespace.ID
 
     var body: some View {
         let thumbHeight = max(72, cardHeight - 44)
@@ -524,18 +659,18 @@ private struct MissionControlCardView: View {
                     }
                 }
                 .overlay(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .stroke(
-                            isSelected ? Color(nsColor: .controlAccentColor) : Color.white.opacity(0.18),
-                            lineWidth: isSelected ? 3.5 : 1
-                        )
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        if isSelected {
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .stroke(Color(nsColor: .controlAccentColor), lineWidth: 3.5)
+                                .shadow(color: Color(nsColor: .controlAccentColor).opacity(0.65), radius: 14, x: 0, y: 2)
+                                .matchedGeometryEffect(id: "mcSelection", in: selectionNamespace)
+                        }
+                    }
                 )
-                .shadow(
-                    color: isSelected ? Color(nsColor: .controlAccentColor).opacity(0.65) : .black.opacity(0.42),
-                    radius: isSelected ? 16 : 10,
-                    x: 0,
-                    y: 4
-                )
+                .shadow(color: .black.opacity(0.42), radius: 10, x: 0, y: 4)
 
                 // 仿调度中心底部压边 App 图标
                 if let icon = item.appIcon {
@@ -558,7 +693,7 @@ private struct MissionControlCardView: View {
         }
         .frame(width: cardWidth, height: cardHeight)
         .scaleEffect(isSelected ? 1.03 : 1.0)
-        .animation(.easeOut(duration: 0.1), value: isSelected)
+        .animation(.spring(response: 0.16, dampingFraction: 0.84), value: isSelected)
     }
 }
 

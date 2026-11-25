@@ -13,9 +13,12 @@ final class SwitcherController {
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
     private var pendingStepWorkItems: [DispatchWorkItem] = []
+    private var pendingHideWorkItem: DispatchWorkItem?
+    private var currentDisplayScreen: NSScreen?
 
     var onUserEscCancel: (() -> Void)?
     var onVisibilityChanged: ((Bool) -> Void)?
+    var onSearchModeChanged: ((Bool) -> Void)?
     var shouldInstallFallbackKeyMonitors: (() -> Bool)?
 
     private(set) var isVisible = false
@@ -24,12 +27,17 @@ final class SwitcherController {
         // 若面板已经处于打开状态（如先由 Option+Tab 持久打开，再结合触控板滑动选窗），不重置当前列表与选中项
         if isVisible { return }
 
+        pendingHideWorkItem?.cancel()
+        pendingHideWorkItem = nil
+
         let items = WindowService.shared.fetchAllSwitchableWindows()
         let settings = AppSettings.shared
         let isPersistent = persistent ?? settings.trackpadPersistentMode
         let screen = screenUnderMouse() ?? NSScreen.main ?? NSScreen.screens.first
+        currentDisplayScreen = screen
         let screenSize = screen?.frame.size ?? CGSize(width: 1440, height: 900)
 
+        viewModel.isPresented = false
         viewModel.load(
             items: items,
             screenSize: screenSize,
@@ -43,8 +51,15 @@ final class SwitcherController {
         layoutAndShowPanel(on: screen, style: settings.displayStyle)
         isVisible = true
         onVisibilityChanged?(true)
+        onSearchModeChanged?(false)
         if shouldInstallFallbackKeyMonitors?() ?? true {
             installKeyMonitors()
+        }
+
+        // 下一帧触发微缩放 + 透明度弹簧入场动画
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isVisible else { return }
+            self.viewModel.isPresented = true
         }
 
         // 异步刷新最新缩略图（优先命中缓存瞬间显示，再补充最新画面）
@@ -180,12 +195,67 @@ final class SwitcherController {
         }
     }
 
+    /// 处理搜索模式快捷键与字符键入（/ 或 Command+F 开启，Esc 退出搜索，Backspace 删字）
+    func handleSearchKey(keyCode: Int64, text: String?, isToggleTrigger: Bool) {
+        guard isVisible else { return }
+        cancelPendingSteps()
+
+        if isToggleTrigger {
+            if !viewModel.isSearching {
+                viewModel.enterSearchMode()
+                onSearchModeChanged?(true)
+                relayoutCompactPanelIfNeeded()
+            }
+            return
+        }
+
+        guard viewModel.isSearching else { return }
+
+        if keyCode == 53 { // Esc 退出搜索回到完整列表
+            viewModel.exitSearchMode()
+            onSearchModeChanged?(false)
+            relayoutCompactPanelIfNeeded()
+            return
+        }
+
+        if keyCode == 51 { // Backspace
+            viewModel.deleteLastSearchChar()
+            relayoutCompactPanelIfNeeded()
+            return
+        }
+
+        if let text, !text.isEmpty {
+            viewModel.appendSearchText(text)
+            relayoutCompactPanelIfNeeded()
+        }
+    }
+
+    private func relayoutCompactPanelIfNeeded() {
+        guard isVisible, viewModel.displayStyle == .compactPanel else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isVisible else { return }
+            self.layoutAndShowPanel(on: self.currentDisplayScreen, style: .compactPanel)
+        }
+    }
+
     private func hide() {
         isVisible = false
+        viewModel.isSearching = false
+        viewModel.searchQuery = ""
+        onSearchModeChanged?(false)
         onVisibilityChanged?(false)
         cancelPendingSteps()
         removeKeyMonitors()
-        panel?.orderOut(nil)
+
+        // 0.095s 轻量淡出缩放，若期间被重新呼出则立即取消 orderOut
+        viewModel.isPresented = false
+        pendingHideWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.isVisible else { return }
+            self.panel?.orderOut(nil)
+        }
+        pendingHideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.095, execute: work)
     }
 
     private func ensurePanel() {
@@ -274,7 +344,55 @@ final class SwitcherController {
     @discardableResult
     private func handleKeyEvent(_ event: NSEvent) -> Bool {
         guard isVisible else { return false }
+
+        if event.modifierFlags.contains(.command), event.keyCode == 3 {
+            DispatchQueue.main.async { [weak self] in
+                self?.handleSearchKey(keyCode: 3, text: nil, isToggleTrigger: true)
+            }
+            return true
+        }
+
+        if viewModel.isSearching {
+            switch event.keyCode {
+            case 53:
+                DispatchQueue.main.async { [weak self] in self?.handleSearchKey(keyCode: 53, text: nil, isToggleTrigger: false) }
+                return true
+            case 51:
+                DispatchQueue.main.async { [weak self] in self?.handleSearchKey(keyCode: 51, text: nil, isToggleTrigger: false) }
+                return true
+            case 48:
+                let reverse = event.modifierFlags.contains(.shift)
+                step(deltaCol: reverse ? -1 : 1, deltaRow: 0)
+                return true
+            case 123: step(deltaCol: -1, deltaRow: 0); return true
+            case 124: step(deltaCol: 1, deltaRow: 0); return true
+            case 125: step(deltaCol: 0, deltaRow: 1); return true
+            case 126: step(deltaCol: 0, deltaRow: -1); return true
+            case 36, 76: commitAndHide(); return true
+            default:
+                if let chars = event.characters, !chars.isEmpty,
+                   event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+                    let filtered = chars.filter { !$0.isNewline && (!$0.isASCII || ($0.asciiValue ?? 0) >= 32) }
+                    if !filtered.isEmpty {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.handleSearchKey(keyCode: Int64(event.keyCode), text: filtered, isToggleTrigger: false)
+                        }
+                    }
+                    return true
+                }
+                return true
+            }
+        }
+
         switch event.keyCode {
+        case 44: // '/' 进入搜索模式
+            if event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleSearchKey(keyCode: 44, text: nil, isToggleTrigger: true)
+                }
+                return true
+            }
+            return false
         case 53: // Esc 取消切换
             DispatchQueue.main.async { [weak self] in
                 self?.onUserEscCancel?()

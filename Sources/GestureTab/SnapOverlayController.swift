@@ -5,8 +5,12 @@ import SwiftUI
 
 final class SnapPreviewOverlayController {
     private var panel: NSPanel?
+    private var pendingHideWork: DispatchWorkItem?
 
     func showPreview(cocoaRect: CGRect) {
+        pendingHideWork?.cancel()
+        pendingHideWork = nil
+
         let insetRect = cocoaRect.insetBy(dx: 6, dy: 6)
         if panel == nil {
             let p = NSPanel(
@@ -28,24 +32,38 @@ final class SnapPreviewOverlayController {
 
         guard let panel else { return }
         if !panel.isVisible {
-            panel.setFrame(insetRect, display: true)
+            let startRect = insetRect.insetBy(dx: 14, dy: 14)
+            panel.setFrame(startRect, display: true)
             panel.alphaValue = 0
             panel.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.12
+                ctx.duration = 0.15
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.12, 0.36, 1.0)
                 panel.animator().alphaValue = 1
+                panel.animator().setFrame(insetRect, display: true)
             }
         } else if panel.frame != insetRect {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.12
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.duration = 0.15
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.12, 0.36, 1.0)
+                panel.animator().alphaValue = 1
                 panel.animator().setFrame(insetRect, display: true)
             }
         }
     }
 
     func hide() {
-        panel?.orderOut(nil)
+        guard let panel, panel.isVisible else { return }
+        pendingHideWork?.cancel()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.08
+            panel.animator().alphaValue = 0
+        }
+        let work = DispatchWorkItem { [weak self] in
+            self?.panel?.orderOut(nil)
+        }
+        pendingHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.085, execute: work)
     }
 }
 
@@ -76,6 +94,8 @@ final class SnapLayoutBarController {
     private var panel: NSPanel?
     private let viewModel = SnapLayoutBarViewModel()
     private(set) var currentScreen: NSScreen?
+    private var isLogicallyVisible = false
+    private var pendingHideWork: DispatchWorkItem?
 
     private let templates = SnapLayout.barTemplates
     private let thumbWidth: CGFloat = 78
@@ -86,11 +106,14 @@ final class SnapLayoutBarController {
     private let titleHeight: CGFloat = 20
 
     var isVisible: Bool {
-        panel?.isVisible ?? false
+        isLogicallyVisible && (panel?.isVisible ?? false)
     }
 
     var panelFrame: CGRect {
-        panel?.frame ?? .zero
+        if let screen = currentScreen {
+            return expectedBarCocoaRect(on: screen)
+        }
+        return panel?.frame ?? .zero
     }
 
     func expectedBarCocoaRect(on screen: NSScreen) -> CGRect {
@@ -120,12 +143,15 @@ final class SnapLayoutBarController {
     }
 
     func show(on screen: NSScreen) {
+        pendingHideWork?.cancel()
+        pendingHideWork = nil
+
         currentScreen = screen
-        let frame = expectedBarCocoaRect(on: screen)
+        let targetFrame = expectedBarCocoaRect(on: screen)
 
         if panel == nil {
             let p = NSPanel(
-                contentRect: frame,
+                contentRect: targetFrame,
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -150,20 +176,59 @@ final class SnapLayoutBarController {
             self.panel = p
         }
 
-        panel?.setFrame(frame, display: true)
-        panel?.orderFrontRegardless()
+        guard let panel else { return }
+        let wasVisible = isLogicallyVisible && panel.isVisible
+        isLogicallyVisible = true
+
+        if !wasVisible {
+            var startFrame = targetFrame
+            startFrame.origin.y += 18
+            panel.setFrame(startFrame, display: true)
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.16
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 1.05, 0.35, 1.0)
+                panel.animator().alphaValue = 1
+                panel.animator().setFrame(targetFrame, display: true)
+            }
+        } else {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.12
+                panel.animator().alphaValue = 1
+                panel.animator().setFrame(targetFrame, display: true)
+            }
+        }
     }
 
     func hide() {
         viewModel.hoveredLayoutID = nil
         viewModel.hoveredZoneIndex = nil
-        panel?.orderOut(nil)
+        guard isLogicallyVisible else { return }
+        isLogicallyVisible = false
+
+        guard let panel, panel.isVisible else { return }
+        pendingHideWork?.cancel()
+        var exitFrame = panel.frame
+        exitFrame.origin.y += 14
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.11
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+            panel.animator().setFrame(exitFrame, display: true)
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.isLogicallyVisible else { return }
+            self.panel?.orderOut(nil)
+        }
+        pendingHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.115, execute: work)
     }
 
-    /// 根据当前鼠标 Cocoa 坐标精确命中模板内的某个分屏区域
+    /// 根据当前鼠标 Cocoa 坐标精确命中模板内的某个分屏区域（使用稳定目标矩形，动画途中也能精准命中）
     func hitTest(cocoaMouse: CGPoint) -> SnapTarget? {
-        guard isVisible, let panel, let screen = currentScreen else { return nil }
-        let pf = panel.frame
+        guard isVisible, let screen = currentScreen else { return nil }
+        let pf = expectedBarCocoaRect(on: screen)
         // 向上延伸到屏幕最顶边，向下留出 14pt 容差，保证从顶边拖入布局栏全程不断触
         let hitMaxY = max(pf.maxY + 24, screen.frame.maxY)
         let hitBounds = CGRect(x: pf.minX, y: pf.minY - 14, width: pf.width, height: hitMaxY - (pf.minY - 14))

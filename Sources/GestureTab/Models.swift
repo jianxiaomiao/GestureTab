@@ -120,6 +120,8 @@ final class AppSettings: ObservableObject {
         static let topSnapZoneMode = "topSnapZoneMode"
         static let snapAssistEnabled = "snapAssistEnabled"
         static let dockPreviewEnabled = "dockPreviewEnabled"
+        static let keyboardSnapEnabled = "keyboardSnapEnabled"
+        static let dockHoverPeekEnabled = "dockHoverPeekEnabled"
     }
 
     @Published var gestureMode: GestureMode {
@@ -208,6 +210,16 @@ final class AppSettings: ObservableObject {
     /// 启用程序坞（Dock）悬停缩略图预览（类 Windows 任务栏预览）
     @Published var dockPreviewEnabled: Bool {
         didSet { UserDefaults.standard.set(dockPreviewEnabled, forKey: Keys.dockPreviewEnabled) }
+    }
+
+    /// 启用键盘分屏快捷键（Control + Option + 方向键 / 回车 / U I J K / 退格还原）
+    @Published var keyboardSnapEnabled: Bool {
+        didSet { UserDefaults.standard.set(keyboardSnapEnabled, forKey: Keys.keyboardSnapEnabled) }
+    }
+
+    /// 启用 Dock 预览悬停卡片「瞄一眼（Peek）」：悬停 0.45s 临时前置预览窗口，移开还原
+    @Published var dockHoverPeekEnabled: Bool {
+        didSet { UserDefaults.standard.set(dockHoverPeekEnabled, forKey: Keys.dockHoverPeekEnabled) }
     }
 
     func isAppIgnored(key: String) -> Bool {
@@ -339,6 +351,18 @@ final class AppSettings: ObservableObject {
             self.dockPreviewEnabled = defaults.bool(forKey: Keys.dockPreviewEnabled)
         } else {
             self.dockPreviewEnabled = true
+        }
+
+        if defaults.object(forKey: Keys.keyboardSnapEnabled) != nil {
+            self.keyboardSnapEnabled = defaults.bool(forKey: Keys.keyboardSnapEnabled)
+        } else {
+            self.keyboardSnapEnabled = true
+        }
+
+        if defaults.object(forKey: Keys.dockHoverPeekEnabled) != nil {
+            self.dockHoverPeekEnabled = defaults.bool(forKey: Keys.dockHoverPeekEnabled)
+        } else {
+            self.dockHoverPeekEnabled = true
         }
     }
 }

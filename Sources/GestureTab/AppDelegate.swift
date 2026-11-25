@@ -71,6 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         multitouch.onPressM = { [weak self] in
             self?.switcher.performMKeyAction()
         }
+        multitouch.onKeyboardSnap = { keyCode in
+            WindowSnapManager.shared.handleKeyboardSnap(keyCode: keyCode)
+        }
+        multitouch.onSearchKey = { [weak self] keyCode, text, isToggle in
+            self?.switcher.handleSearchKey(keyCode: keyCode, text: text, isToggleTrigger: isToggle)
+        }
         switcher.onUserEscCancel = { [weak self] in
             self?.multitouch.cancelCurrentGesture()
         }
@@ -80,8 +86,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DockPreviewManager.shared.hideImmediately()
             }
         }
+        switcher.onSearchModeChanged = { [weak self] active in
+            self?.multitouch.setSearchModeActive(active)
+        }
         switcher.shouldInstallFallbackKeyMonitors = { [weak self] in
             !(self?.multitouch.isEventTapActive ?? false)
+        }
+        PreferencesWindowController.shared.onRestartMultitouch = { [weak self] in
+            self?.restartMultitouch()
         }
     }
 
@@ -173,6 +185,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
+
+        let prefsItem = NSMenuItem(title: "偏好设置...", action: #selector(openPreferences), keyEquivalent: ",")
+        prefsItem.target = self
+        menu.addItem(prefsItem)
 
         let previewItem = NSMenuItem(title: "预览多任务视图（按 Esc 关闭）", action: #selector(previewSwitcher), keyEquivalent: "")
         previewItem.target = self
@@ -345,6 +361,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         snapAssistToggle.state = settings.snapAssistEnabled ? .on : .off
         snapMenu.addItem(snapAssistToggle)
 
+        let keySnapToggle = NSMenuItem(title: "启用键盘分屏快捷键（⌃⌥ + 方向键/回车/UIJK/退格）", action: #selector(toggleKeyboardSnap), keyEquivalent: "")
+        keySnapToggle.target = self
+        keySnapToggle.state = settings.keyboardSnapEnabled ? .on : .off
+        snapMenu.addItem(keySnapToggle)
+
         snapMenu.addItem(.separator())
         let topModeHeader = NSMenuItem(title: "顶部热区触发模式：", action: nil, keyEquivalent: "")
         topModeHeader.isEnabled = false
@@ -372,6 +393,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dockPreviewItem.state = settings.dockPreviewEnabled ? .on : .off
         menu.addItem(dockPreviewItem)
 
+        let dockPeekItem = NSMenuItem(title: "  └ 悬停缩略图卡片「瞄一眼 (Peek)」预览", action: #selector(toggleDockHoverPeek), keyEquivalent: "")
+        dockPeekItem.target = self
+        dockPeekItem.state = settings.dockHoverPeekEnabled ? .on : .off
+        dockPeekItem.isEnabled = settings.dockPreviewEnabled
+        menu.addItem(dockPeekItem)
+
         menu.addItem(.separator())
 
         let trackpadTipItem = NSMenuItem(title: "打开系统「触控板」设置（关闭原生四指防冲突）", action: #selector(openTrackpadSettings), keyEquivalent: "")
@@ -394,6 +421,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.delegate = self
         statusItem.menu = menu
+    }
+
+    @objc private func openPreferences() {
+        PreferencesWindowController.shared.show()
     }
 
     @objc private func previewSwitcher() {
@@ -485,6 +516,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    @objc private func toggleKeyboardSnap() {
+        AppSettings.shared.keyboardSnapEnabled.toggle()
+        rebuildMenu()
+    }
+
     @objc private func toggleDockPreview() {
         AppSettings.shared.dockPreviewEnabled.toggle()
         if AppSettings.shared.dockPreviewEnabled {
@@ -492,6 +528,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             DockPreviewManager.shared.stop()
         }
+        rebuildMenu()
+    }
+
+    @objc private func toggleDockHoverPeek() {
+        AppSettings.shared.dockHoverPeekEnabled.toggle()
         rebuildMenu()
     }
 
