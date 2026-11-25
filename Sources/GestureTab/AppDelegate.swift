@@ -204,21 +204,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         modeParent.submenu = modeMenu
         menu.addItem(modeParent)
 
-        // 步进灵敏度子菜单
+        // 步进灵敏度子菜单（滑块 + 右侧数值点击直接输入，菜单项旁同步显示当前数值）
         let sensMenu = NSMenu()
-        let presets: [(String, Double, Double)] = [
-            ("偏灵敏（轻滑跳格）", 0.075, 0.095),
-            ("适中顺滑（推荐默认 · 类 Windows 步距）", 0.095, 0.115),
-            ("稳重防滑（大幅度滑动）", 0.135, 0.150)
-        ]
-        for (label, hx, vy) in presets {
-            let sItem = NSMenuItem(title: label, action: #selector(selectSensitivity(_:)), keyEquivalent: "")
-            sItem.target = self
-            sItem.representedObject = [hx, vy]
-            sItem.state = abs(settings.horizontalStep - hx) < 0.005 ? .on : .off
-            sensMenu.addItem(sItem)
-        }
-        let sensParent = NSMenuItem(title: "触控板滑动灵敏度", action: nil, keyEquivalent: "")
+        let sensParent = NSMenuItem(
+            title: SensitivityRange.menuTitle(h: settings.horizontalStep, v: settings.verticalStep),
+            action: nil,
+            keyEquivalent: ""
+        )
+        let sliderItem = NSMenuItem()
+        sliderItem.view = SensitivityMenuView(parentMenuItem: sensParent, hostMenu: menu)
+        sensMenu.addItem(sliderItem)
         sensParent.submenu = sensMenu
         menu.addItem(sensParent)
 
@@ -417,14 +412,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let raw = sender.representedObject as? String,
            let style = DisplayStyle(rawValue: raw) {
             AppSettings.shared.displayStyle = style
-            rebuildMenu()
-        }
-    }
-
-    @objc private func selectSensitivity(_ sender: NSMenuItem) {
-        if let pair = sender.representedObject as? [Double], pair.count == 2 {
-            AppSettings.shared.horizontalStep = pair[0]
-            AppSettings.shared.verticalStep = pair[1]
             rebuildMenu()
         }
     }
